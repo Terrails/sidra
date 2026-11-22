@@ -40,8 +40,11 @@ const UNRESTRICT = process.env.AM_WEBUI_UNRESTRICT === "1";
 const LIBRARY_SHUFFLE = process.env.AM_WEBUI_LIBRARY_SHUFFLE !== "0";
 const QUIT_WAIT_MS = 3000;
 
-/** Playback always goes through the wrapper service in this build. */
-export const AGENT_ENABLED = true;
+/**
+ * Playback goes through the Wine engine's service unless AM_WEBUI_AGENT=0: then no hook is
+ * injected, the wedge detector stays on and no service is started, as in upstream Sidra.
+ */
+export const AGENT_ENABLED = process.env.AM_WEBUI_AGENT !== "0";
 
 /** The parts of the page hook, in the order they run (see assets/agent/hook.js). */
 const AGENT_PARTS = ["link", "media", "musickit", "quality", "shuffle", "start"];
