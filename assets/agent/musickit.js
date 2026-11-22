@@ -1,7 +1,7 @@
 // Part of the wrapper-service hook (assets/agent/hook.js holds the frame and the overview).
 // The parts run inside one closure, in the order AGENT_PARTS in src/agent/index.ts lists them,
 // and share its names; this one provides:
-//   mk, agentPlayer, adoptVolume(), jobFor(), hook(inst)
+//   mk, agentPlayer, adoptVolume(), jobFor(), unrestrict(inst), hook(inst)
 
 // ---- MusicKit hooks -------------------------------------------------------
 let mk = null;
@@ -36,6 +36,25 @@ function jobFor(item) {
     const cc = (m && m[1]) || (mk && mk.storefrontCountryCode) || cfg.storefront;
     return { song, album, cc: /^[a-z]{2}$/.test(cc) ? cc : cfg.storefront, title: item.title || (item.attributes && item.attributes.name) || '', durMs: item.playbackDuration || 0 };
   } catch (e) { log('jobFor', String(e)); return null; }
+}
+
+// Explicit-content restriction off. The page greys out explicit rows while MusicKit's
+// restrictedEnabled is on (row disabled = isDisabled || explicit && restricted), and MusicKit
+// drops explicit items from a restricted queue. The setter is MusicKit's own override: it stores
+// "0" and ignores later sets (sign-in, account data). A status still at RESTRICTED (2) goes to
+// AUTHORIZED (3); that change is the event the page re-reads restrictedEnabled on, so rows that
+// are already shown turn normal. Called every 300 ms (start.js): sign-out resets the value.
+// Off unless AM_WEBUI_UNRESTRICT=1 (cfg.unrestrict, src/agent/index.ts): it also overrides a
+// restriction that is set on purpose.
+function unrestrict(inst) {
+  if (inst.restrictedEnabled) {
+    inst.restrictedEnabled = false;
+    log('explicit-content restriction turned off');
+  }
+  // the instance has no storekit of its own; its playback controller holds the shared one
+  const pc = inst.playbackController || inst._playbackController;
+  const sk = pc && pc.storekit;
+  if (sk && sk.authorizationStatus === 2 && sk.userToken && !inst.restrictedEnabled) sk.authorizationStatus = 3;
 }
 
 function hook(inst) {
