@@ -11,6 +11,13 @@
 .amagent-quality.amagent-quality-met { color: #2fb350; border-color: #2fb350; }
 .amagent-quality.amagent-quality-partial { color: #d9a20b; border-color: #d9a20b; }
 .amagent-quality.amagent-quality-short { color: #e5484d; border-color: #e5484d; }
+.amagent-stuck {
+  flex: none; align-self: center; margin: 0 6px 0 0; padding: 2px 5px; border-radius: 4px;
+  border: 1px solid #e5484d; color: #e5484d; white-space: nowrap;
+  font: 600 9.5px/1.2 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  letter-spacing: .04em; text-transform: uppercase;
+}
+.amagent-stuck[hidden] { display: none !important; }
 .amagent-quality:focus-visible, .amagent-quality-menu button:focus-visible { outline: 2px solid var(--keyColorBG, #fa586a); outline-offset: 1px; }
 .amagent-quality:disabled { opacity: .5; cursor: default; }
 .amagent-quality-menu {

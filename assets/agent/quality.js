@@ -2,11 +2,12 @@
 // The parts run inside one closure, in the order AGENT_PARTS in src/agent/index.ts lists them,
 // and share its names; this one provides:
 //   the audio quality button in the player bar: qualityEnsure(), qualityRender(), quality
+//   (with the "engine not responding" badge next to it)
 
 // ---- audio quality button in the player bar ---------------------------------
 // (styles: assets/agent/style.css, inserted by the main process: the page CSP blocks our own <style>)
 const QUALITIES = [['aac', 'AAC', 'High Quality (AAC)'], ['lossless', 'Lossless', 'Lossless'], ['hires', 'Hi-Res', 'Hi-Res Lossless']];
-const quality = { btn: null, menu: null, want: null, wantAt: 0 };
+const quality = { btn: null, stuck: null, menu: null, want: null, wantAt: 0 };
 
 function qualityNow() {
   if (quality.want && now() - quality.wantAt < 3000) return quality.want;    // just picked; the service has not confirmed yet
@@ -53,6 +54,13 @@ function qualityRender() {
     b.setAttribute('aria-label', 'Audio quality' + (row ? ': ' + row[2] : '') + (detail ? `, playing ${detail}` : ''));
   }
   if (quality.menu) for (const it of quality.menu.querySelectorAll('[data-q]')) it.setAttribute('aria-checked', String(it.dataset.q === q));
+  // the service's watchdog: an engine call has not returned within 5 s (agentHung in /status)
+  const s = quality.stuck;
+  if (s) {
+    const hung = !!(status && status.agentHung);
+    s.hidden = !hung;
+    if (hung && status.agentPhase) s.title = `Stuck in ${status.agentPhase}`; else s.removeAttribute('title');
+  }
 }
 
 function qualityClose() {
@@ -138,6 +146,14 @@ function qualityEnsure() {
   });
   host.prepend(b);
   quality.btn = b;
+  if (quality.stuck) quality.stuck.remove();
+  const s = document.createElement('span');
+  s.className = 'amagent-stuck';
+  s.setAttribute('role', 'status');
+  s.textContent = 'Engine not responding';
+  s.hidden = true;
+  host.prepend(s);
+  quality.stuck = s;
   qualityRender();
 }
 window.addEventListener('resize', qualityClose);
