@@ -1,0 +1,210 @@
+#!/bin/sh
+# Silent end-to-end check of the Wine-engine playback path against the agent's mock service:
+# no Wine, no sound, no sign-in, temporary profiles; does not touch a running service, your
+# Sidra profiles or your desktop entries.
+#   hook     the MusicKit hook attaches and the quality button appears
+#   player   play, pause, seek + resume, next                    (test/agent-smoke.js)
+#   badge    the "engine not responding" badge (the mock's POST /mock/hang) shows and clears
+#   reload   a page reload pauses playback, also a track that is still loading
+#   quit     quitting Sidra (SIGTERM) sends POST /quit to the service
+#   missing  without a service to start, the badge says "Engine not found" (no path in the page)
+#   failed   a service whose bin/amd exits at once: the badge says "Engine failed to start" and
+#            its output is in Sidra's log directory (amd-start.log)
+#   upstream with AM_WEBUI_AGENT=0 MusicKit runs without the hook and without window.amAgent
+#
+# usage: AM_AGENT_DIR=<checkout of wine-engine-for-apple-music> test/agent-smoke.sh
+#        (or: npm run test:agent)
+# Needs network (music.apple.com, iTunes lookups), node, curl, timeout (coreutils), `npm ci` done
+# in this checkout, and a Wayland or X11 session (the windows stay hidden;
+# --ozone-platform=headless does not work: the page never lays out its player bar there). The
+# Electron binary and dist/ are fetched/built first (scripts/run-with-agent.sh --prepare-only).
+# The mock is $AM_AGENT_DIR/test/mock-daemon.mjs; the real service is never started (the
+# "failed" phase starts a stand-in bin/amd that only prints a line and exits 1).
+# SMOKE_PORT (default 7699) is the mock's port, SMOKE_CDP_PORT (default 9362) the first of the
+# four DevTools ports. SMOKE_ELECTRON_ARGS (default none) are extra Electron arguments.
+# SMOKE_SONGS (default "617154353 617154366") are two consecutive catalogue song IDs of one album
+# that the page plays; the mock looks their titles up in the public iTunes lookup API.
+SELF="$(readlink -f "$0")"
+T="$(dirname "$SELF")"
+SIDRA="$(dirname "$T")"
+RUN="$SIDRA/scripts/run-with-agent.sh"
+if [ -z "$AM_AGENT_DIR" ]; then
+    echo "agent-smoke: set AM_AGENT_DIR to a checkout of wine-engine-for-apple-music" >&2
+    echo "             (the mock service is its test/mock-daemon.mjs)" >&2
+    exit 2
+fi
+MOCK_JS="$AM_AGENT_DIR/test/mock-daemon.mjs"
+if [ ! -f "$MOCK_JS" ]; then
+    echo "agent-smoke: $MOCK_JS not found: is AM_AGENT_DIR a checkout of wine-engine-for-apple-music?" >&2
+    exit 2
+fi
+# shellcheck disable=SC2086 # split SMOKE_SONGS into two IDs
+set -- ${SMOKE_SONGS:-617154353 617154366}
+is_id() { case $1 in ''|*[!0-9]*) return 1;; esac; }
+if [ $# != 2 ] || ! is_id "$1" || ! is_id "$2"; then
+    echo "agent-smoke: SMOKE_SONGS must be two numeric song IDs" >&2; exit 2
+fi
+SONG1=$1 SONG2=$2
+for tool in node curl timeout; do
+    command -v "$tool" > /dev/null || { echo "agent-smoke: $tool is needed" >&2; exit 2; }
+done
+# Electron binary and dist/ now, so that the first wait below does not include a download or build.
+"$RUN" --prepare-only || { echo "agent-smoke: scripts/run-with-agent.sh --prepare-only failed" >&2; exit 1; }
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/sidra-agent-smoke.XXXXXX")"
+PORT=${SMOKE_PORT:-7699}
+CDP=${SMOKE_CDP_PORT:-9362}
+CDP_MISSING=$((CDP + 1))
+CDP_UPSTREAM=$((CDP + 2))
+CDP_FAILED=$((CDP + 3))
+ELECTRON_ARGS=${SMOKE_ELECTRON_ARGS-}
+FAIL=0
+
+# On failure the logs stay in $TMP.
+cleanup() {
+    pkill -f "$TMP" 2>/dev/null; kill "$MOCK" 2>/dev/null; sleep 0.5
+    if [ "$FAIL" = 0 ]; then rm -rf "$TMP"; else echo "agent-smoke: logs kept in $TMP" >&2; fi
+}
+trap cleanup EXIT
+trap 'FAIL=1; exit 130' INT TERM
+sed -e "s/__SONG1__/$SONG1/g" -e "s/__SONG2__/$SONG2/g" "$T/agent-smoke.js" > "$TMP/agent-smoke.js"
+
+# The service writes its API token into the prefix; the mock accepts "mocktoken".
+mkdir -p "$TMP/prefix/drive_c/users/x/AppData/Local/AppleMusicWrapper"
+printf mocktoken > "$TMP/prefix/drive_c/users/x/AppData/Local/AppleMusicWrapper/token"
+node "$MOCK_JS" "$PORT" > "$TMP/mock.log" 2>&1 &
+MOCK=$!
+sleep 0.5
+kill -0 "$MOCK" 2>/dev/null || { head -5 "$TMP/mock.log"; echo "agent-smoke: mock service did not start (port $PORT busy? SMOKE_PORT=...)"; exit 1; }
+
+# Sidra through scripts/run-with-agent.sh, with everything it writes kept in $TMP: the profile,
+# the desktop entry and icons (XDG_DATA_HOME). AM_AGENT_DIR is dropped so that nothing can
+# start the real service. usage: sidra <profile> <DevTools port> <log> [VAR=value...]
+# When it exits, its exit code goes to $SIDRA_DONE (wait_page then stops waiting).
+sidra() {
+    profile=$1 cdp=$2 log=$3; shift 3
+    SIDRA_DONE="$TMP/$profile.exited"
+    # shellcheck disable=SC2086 # ELECTRON_ARGS is a list of arguments
+    { env -u AM_AGENT_DIR -u WINEPREFIX XDG_DATA_HOME="$TMP/xdg-data" AM_PREFIX="$TMP/prefix" \
+        AM_WEBUI_HIDDEN=1 AM_WEBUI_PROFILE="$TMP/$profile" "$@" \
+        "$RUN" --remote-debugging-port="$cdp" --mute-audio $ELECTRON_ARGS > "$TMP/$log" 2>&1
+      echo $? > "$SIDRA_DONE"; } 2>/dev/null &
+}
+
+# wait until the page on DevTools port $1 answers expression $2 with "true" (up to $3 s, or
+# until the Sidra started last has exited)
+wait_page() {
+    i=0
+    while [ $i -lt "$3" ]; do
+        [ "$(node "$T/cdp.mjs" "$1" -e "$2" 2>/dev/null)" = "true" ] && return 0
+        if [ -f "$SIDRA_DONE" ]; then echo "  Sidra exited (code $(cat "$SIDRA_DONE"))"; return 1; fi
+        sleep 1; i=$((i + 1))
+    done
+    return 1
+}
+
+# the mock's agent watchdog: hang (call name $1) or recover (no argument)
+mock_hang() { curl -s -m 5 -X POST -H "Authorization: Bearer mocktoken" "http://127.0.0.1:$PORT/mock/hang?call=$1" > /dev/null; }
+
+# the mock's playing/paused state and song ID
+mock_state() { curl -s -m 5 -H "Authorization: Bearer mocktoken" "http://127.0.0.1:$PORT/status" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d);console.log(s.playing?"playing":s.paused?"paused":"stopped",s.nowPlaying?.songId??"-")})'; }
+
+# run page script $2 on DevTools port $1 and check that every pattern after it appears
+check() {
+    port=$1 script=$2 name=$3; shift 3
+    out=$(timeout 60 node "$T/cdp.mjs" "$port" "$script" 2>&1)
+    echo "$out" | sed "s/^/  $name: /"
+    for pat in "$@"; do
+        echo "$out" | grep -q -- "$pat" || { echo "  $name: FAILED, missing: $pat"; FAIL=1; }
+    done
+}
+
+# the page on DevTools port $1 shows a hung engine (expression $2 true) and clears it again
+check_hung() {
+    mock_hang 'MediaAppExecAgentCommandAsync(5013)'
+    if wait_page "$1" "$2" 10; then
+        mock_hang
+        if wait_page "$1" "!($2)" 10; then echo "  badge: engine stuck shown and cleared"
+        else echo "  badge: FAILED, engine stuck not cleared"; FAIL=1; fi
+    else mock_hang; echo "  badge: FAILED, engine stuck not shown"; FAIL=1; fi
+}
+
+# a reload pauses what the page plays, and a track still loading when the page goes away is
+# paused once it starts
+HOOKED='!!window.__amAgentHooked && !!document.querySelector(".amagent-quality")'
+reload_page() { node "$T/cdp.mjs" "$1" -e 'setTimeout(() => location.reload(), 50), 1' > /dev/null; sleep 1; wait_page "$1" "$HOOKED" 60; }
+expect_state() {
+    sleep "$2"; got=$(mock_state)
+    case "$got" in "$3"*) echo "  reload: $4: $got";; *) echo "  reload: FAILED, $4: $got, expected $3"; FAIL=1;; esac
+}
+check_reload() {
+    node "$T/cdp.mjs" "$1" -e '(async () => { const mk = MusicKit.getInstance(); await mk.setQueue({ songs: ["'"$SONG1"'", "'"$SONG2"'"] }); await mk.play(); return 1; })()' > /dev/null
+    expect_state "$1" 3 playing "page playing"
+    reload_page "$1"; expect_state "$1" 1 paused "page reloaded"
+    node "$T/cdp.mjs" "$1" -e '(async () => { const mk = MusicKit.getInstance(); await mk.setQueue({ songs: ["'"$SONG1"'"] }); mk.play(); setTimeout(() => location.reload(), 300); return 1; })()' > /dev/null
+    sleep 1; wait_page "$1" "$HOOKED" 60; expect_state "$1" 2 "paused $SONG1" "reloaded while loading"
+}
+
+# quit Sidra's main process like a session logout or Ctrl+C would: the service gets POST /quit
+check_quit() {
+    pkill -TERM -o -f -- "--user-data-dir=$TMP/$1"
+    i=0; while [ $i -lt 10 ] && pgrep -f "$TMP/$1" > /dev/null; do sleep 1; i=$((i + 1)); done
+    if pgrep -f "$TMP/$1" > /dev/null; then echo "  quit: FAILED, still running"; FAIL=1
+    elif tail -n 3 "$TMP/mock.log" | grep -q "POST /quit"; then echo "  quit: service asked to quit"
+    else echo "  quit: FAILED, no POST /quit"; FAIL=1; fi
+}
+
+echo "Sidra against the mock service:"
+sidra sidra-profile "$CDP" sidra.log AM_PORT="$PORT" AM_WEBUI_NO_SPAWN=1
+if wait_page "$CDP" "$HOOKED" 120; then
+    echo "  hook: attached, quality button shown"
+    check "$CDP" "$TMP/agent-smoke.js" player 'state=2 item=' 'paused state=3' 'after seek t=6' 'next item='
+    check_hung "$CDP" '!!document.querySelector(".amagent-stuck:not([hidden])")?.offsetParent'
+    check_reload "$CDP"
+    check_quit sidra-profile
+else echo "  hook: FAILED, not attached (log: $TMP/sidra.log)"; FAIL=1; tail -n 20 "$TMP/sidra.log"; fi
+pkill -f "$TMP/sidra-profile"
+
+echo "Sidra without a service to start:"
+# AM_AGENT_DIR names an empty directory and nothing listens on the port: the badge must say so.
+mkdir -p "$TMP/no-agent"
+sidra missing-profile "$CDP_MISSING" missing.log AM_PORT=$((PORT + 1)) AM_AGENT_DIR="$TMP/no-agent"
+# The tooltip names AM_AGENT_DIR and the agent repository but no path (the page is Apple's).
+MISSING='(() => { const b = document.querySelector(".amagent-stuck:not([hidden])"); return !!b && b.textContent === "Engine not found" && b.title.includes("AM_AGENT_DIR") && b.title.includes("wine-engine-for-apple-music") && !b.title.includes("no-agent"); })()'
+if wait_page "$CDP_MISSING" "$MISSING" 120; then echo "  missing: badge says the engine was not found"
+else echo "  missing: FAILED, no \"Engine not found\" badge (log: $TMP/missing.log)"; FAIL=1; fi
+if grep "player service was not found" "$TMP/missing.log" "$TMP/missing-profile/logs/"*.log 2>/dev/null | grep -q "no-agent/bin/amd"; then echo "  missing: logged with the path"
+else echo "  missing: FAILED, not logged"; FAIL=1; fi
+pkill -f "$TMP/missing-profile"
+
+echo "Sidra with a service that fails to start:"
+# A stand-in checkout whose bin/amd exits 1 at once, as the real one does before setup-prefix.sh.
+mkdir -p "$TMP/bad-agent/bin"
+printf '#!/bin/sh\necho "stand-in amd: not set up" >&2\nexit 1\n' > "$TMP/bad-agent/bin/amd"
+: > "$TMP/bad-agent/bin/amd-env.sh"
+chmod +x "$TMP/bad-agent/bin/amd"
+sidra failed-profile "$CDP_FAILED" failed.log AM_PORT=$((PORT + 3)) AM_AGENT_DIR="$TMP/bad-agent"
+FAILED='(() => { const b = document.querySelector(".amagent-stuck:not([hidden])"); return !!b && b.textContent === "Engine failed to start" && b.title.includes("code 1") && !b.title.includes("/"); })()'
+if wait_page "$CDP_FAILED" "$FAILED" 120; then echo "  failed: badge says the engine failed to start"
+else echo "  failed: FAILED, no \"Engine failed to start\" badge (log: $TMP/failed.log)"; FAIL=1; fi
+if grep -q "exited with code 1" "$TMP/failed.log" "$TMP/failed-profile/logs/"*.log 2>/dev/null &&
+    grep -q "stand-in amd: not set up" "$TMP/failed-profile/logs/amd-start.log" 2>/dev/null; then echo "  failed: logged, output in amd-start.log"
+else echo "  failed: FAILED, not logged or no amd-start.log"; FAIL=1; fi
+pkill -f "$TMP/failed-profile"
+
+echo "Sidra with the agent switched off (AM_WEBUI_AGENT=0):"
+sidra upstream-profile "$CDP_UPSTREAM" upstream.log AM_PORT=$((PORT + 2)) AM_WEBUI_AGENT=0 AM_WEBUI_NO_SPAWN=1
+MK_READY='(() => { try { return !!(window.MusicKit && MusicKit.getInstance && MusicKit.getInstance()); } catch { return false; } })()'
+if wait_page "$CDP_UPSTREAM" "$MK_READY" 120; then
+    sleep 3   # the hook would attach within a few 300 ms ticks
+    if [ "$(node "$T/cdp.mjs" "$CDP_UPSTREAM" -e '!window.__amAgentHooked && !document.querySelector(".amagent-quality") && typeof window.amAgent === "undefined"' 2>/dev/null)" = true ]; then
+        echo "  upstream: MusicKit configured, no hook, no quality button, no amAgent bridge"
+    else echo "  upstream: FAILED, the hook or the bridge is present (log: $TMP/upstream.log)"; FAIL=1; fi
+else echo "  upstream: FAILED, MusicKit never configured (log: $TMP/upstream.log)"; FAIL=1; fi
+pkill -f "$TMP/upstream-profile"
+if grep -q "player service on" "$TMP/upstream.log" "$TMP/upstream-profile/logs/"*.log 2>/dev/null; then
+    echo "  upstream: FAILED, the agent was started"; FAIL=1
+else echo "  upstream: agent not started"; fi
+
+echo "mock service saw:"; grep -v "mock on" "$TMP/mock.log" | sed 's/^/  /'
+[ $FAIL = 0 ] && echo "agent-smoke: OK" || echo "agent-smoke: FAILED"
+exit $FAIL

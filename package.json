@@ -8,7 +8,9 @@
     "prebuild": "node scripts/inject-lastfm-credentials.cjs",
     "build": "tsc",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "start:agent": "sh scripts/run-with-agent.sh",
+    "test:agent": "sh test/agent-smoke.sh"
   },
   "author": "Martin Wimpress <code@wimpress.io>",
   "homepage": "https://github.com/wimpysworld/sidra",
