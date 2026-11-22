@@ -8,6 +8,9 @@
   letter-spacing: .04em; text-transform: uppercase; white-space: nowrap;
 }
 .amagent-quality:hover, .amagent-quality[aria-expanded="true"] { color: var(--systemPrimary, inherit); border-color: var(--systemSecondary, currentColor); }
+.amagent-quality.amagent-quality-met { color: #2fb350; border-color: #2fb350; }
+.amagent-quality.amagent-quality-partial { color: #d9a20b; border-color: #d9a20b; }
+.amagent-quality.amagent-quality-short { color: #e5484d; border-color: #e5484d; }
 .amagent-quality:focus-visible, .amagent-quality-menu button:focus-visible { outline: 2px solid var(--keyColorBG, #fa586a); outline-offset: 1px; }
 .amagent-quality:disabled { opacity: .5; cursor: default; }
 .amagent-quality-menu {

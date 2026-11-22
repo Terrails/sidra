@@ -13,6 +13,27 @@ function qualityNow() {
   return (status && status.quality) || null;
 }
 
+// how good a format is, and the floor each setting asks for (Atmos/spatial/surround are not lossless)
+const FORMAT_RANK = { other: 0, lossless: 1, hires: 2 };
+const FLOOR = { aac: 0, lossless: 1, hires: 2 };
+
+// 'met' / 'partial' / 'short' by how far what plays is below the chosen floor, null while unknown:
+// nothing playing, no setting yet, or the first seconds of a track (format "other" with sample
+// rate "0", the AAC variant played before the stream switches)
+function qualityLevel(np, q) {
+  if (!np || !np.format || !(Number(np.sampleRate) > 0) || !(q in FLOOR)) return null;
+  const gap = FLOOR[q] - (FORMAT_RANK[np.format] || 0);
+  return gap <= 0 ? 'met' : gap === 1 ? 'partial' : 'short';
+}
+
+// "24-bit/88.2 kHz", or "44.1 kHz" (the engine reports the bit depth for hi-res, rarely otherwise)
+function formatDetail(np) {
+  if (!np) return '';
+  const rate = Number(np.sampleRate) > 0 ? `${np.sampleRate} kHz` : '';
+  const depth = Number(np.bitDepth) > 0 ? `${np.bitDepth}-bit` : '';
+  return depth && rate ? `${depth}/${rate}` : rate;
+}
+
 function qualityRender() {
   const q = qualityNow();
   const b = quality.btn;
@@ -21,10 +42,15 @@ function qualityRender() {
     b.textContent = row ? row[1] : '···';
     b.disabled = !row;
     const np = status && status.nowPlaying;
-    const fmt = np && np.format && (QUALITIES.find((x) => x[0] === np.format) || [0, 0, np.format])[2];
-    const detail = np && Number(np.bitDepth) && Number(np.sampleRate) ? ` · ${np.bitDepth}-bit/${np.sampleRate} kHz` : '';
-    b.title = 'Audio quality' + (fmt ? `\nPlaying now: ${fmt}${detail}` : '');
-    b.setAttribute('aria-label', 'Audio quality' + (row ? ': ' + row[2] : ''));
+    // green while what plays reaches the chosen floor, yellow one step below it (lossless for
+    // Hi-Res, AAC for Lossless), red two steps below (AAC for Hi-Res); no colour while unknown
+    const level = qualityLevel(np, q);
+    b.classList.toggle('amagent-quality-met', level === 'met');
+    b.classList.toggle('amagent-quality-partial', level === 'partial');
+    b.classList.toggle('amagent-quality-short', level === 'short');
+    const detail = formatDetail(np);
+    if (detail) b.title = detail; else b.removeAttribute('title');
+    b.setAttribute('aria-label', 'Audio quality' + (row ? ': ' + row[2] : '') + (detail ? `, playing ${detail}` : ''));
   }
   if (quality.menu) for (const it of quality.menu.querySelectorAll('[data-q]')) it.setAttribute('aria-checked', String(it.dataset.q === q));
 }
