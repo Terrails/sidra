@@ -2,7 +2,8 @@ import { app } from "electron";
 import path from "path";
 
 export function getDesktopId(): string {
- return process.env.FLATPAK_ID || app.getName().toLowerCase();
+ // AM_WEBUI_DESKTOP_ID: the desktop entry scripts/run-with-agent.sh installs (window icon, MPRIS, notifications)
+ return process.env.FLATPAK_ID || process.env.AM_WEBUI_DESKTOP_ID || app.getName().toLowerCase();
 }
 
 /**
