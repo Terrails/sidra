@@ -23,6 +23,8 @@ const DEBUG = Boolean(process.env.AM_WEBUI_DEBUG);
 const POLL_MS = 250;
 /** AM_WEBUI_KEEP_SERVICE=1 (scripts/run-with-agent.sh --keep-service): on quit only stop playback. */
 const KEEP_SERVICE = Boolean(process.env.AM_WEBUI_KEEP_SERVICE);
+/** AM_WEBUI_MIXED_QUEUE=1: queue lists of songs and music videos in order (mixedQueueFix()). */
+const MIXED_QUEUE = Boolean(process.env.AM_WEBUI_MIXED_QUEUE);
 /** AM_WEBUI_UNRESTRICT=1: turn MusicKit's explicit-content restriction off (unrestrict()). */
 const UNRESTRICT = process.env.AM_WEBUI_UNRESTRICT === "1";
 const QUIT_WAIT_MS = 3000;
@@ -41,7 +43,7 @@ export function loadAgentAssets(): { css: string; script: string } {
   const read = (name: string): string =>
     fs.readFileSync(getAssetPath("assets", "agent", name), "utf-8");
   const parts = AGENT_PARTS.map((p) => read(`${p}.js`)).join("\n");
-  const config = JSON.stringify({ storefront: STOREFRONT, debug: DEBUG, unrestrict: UNRESTRICT });
+  const config = JSON.stringify({ storefront: STOREFRONT, debug: DEBUG, unrestrict: UNRESTRICT, mixedQueue: MIXED_QUEUE });
   const script = `${read("hook.js").replace("__AGENT_PARTS__", () => parts)}
 ;window.__amAgentInit && window.__amAgentInit(${config});`;
   return { css: read("style.css"), script };

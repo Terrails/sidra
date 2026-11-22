@@ -1,7 +1,7 @@
 // Part of the wrapper-service hook (assets/agent/hook.js holds the frame and the overview).
 // The parts run inside one closure, in the order AGENT_PARTS in src/agent/index.ts lists them,
 // and share its names; this one provides:
-//   mk, agentPlayer, adoptVolume(), jobFor(), unrestrict(inst), hook(inst)
+//   mk, agentPlayer, adoptVolume(), jobFor(), unrestrict(inst), mixedQueueFix(inst), hook(inst)
 
 // ---- MusicKit hooks -------------------------------------------------------
 let mk = null;
@@ -57,6 +57,80 @@ function unrestrict(inst) {
   if (sk && sk.authorizationStatus === 2 && sk.userToken && !inst.restrictedEnabled) sk.authorizationStatus = 3;
 }
 
+// Mixed-kind queues. A list holding songs and music videos (a library playlist with a video in
+// it) is played by the page as setQueue({ songs: [...], musicVideos: [...], startWith }), which
+// MusicKit refuses ("Using multiple media kinds is not supported"); the page shows that as "Not
+// available on the web". The kinds are split by then, so their order is gone: it is taken from
+// the container the page shows (its tracks, fetched with the page's own MusicKit), and the call
+// goes on as one ordered { items } list with the page's other options. Only the tracks the page
+// sent are queued. Anything not found that way goes to MusicKit unchanged (and fails as before).
+// Off unless AM_WEBUI_MIXED_QUEUE=1 (cfg.mixedQueue, src/agent/index.ts).
+const QUEUE_KINDS = ['songs', 'musicVideos', 'librarySongs', 'uploadedAudios', 'uploadedVideos', 'musicMovies', 'episodes', 'podcastEpisodes',
+  'song', 'musicVideo', 'librarySong', 'uploadedAudio', 'uploadedVideo', 'musicMovie', 'episode', 'podcastEpisode'];
+
+// tracks endpoint of the album or playlist on the current page, else null
+function containerTracksPath() {
+  const p = location.pathname;
+  let m;
+  if ((m = /^\/library\/playlist\/(p\.[A-Za-z0-9]+)/.exec(p))) return `/v1/me/library/playlists/${m[1]}/tracks`;
+  if ((m = /^\/library\/albums?\/(l\.[A-Za-z0-9]+)/.exec(p))) return `/v1/me/library/albums/${m[1]}/tracks`;
+  if ((m = /^\/([a-z]{2})\/playlist\/[^/]+\/(pl\.[A-Za-z0-9-]+)/.exec(p))) return `/v1/catalog/${m[1]}/playlists/${m[2]}/tracks`;
+  if ((m = /^\/([a-z]{2})\/album\/[^/]+\/(\d+)/.exec(p))) return `/v1/catalog/${m[1]}/albums/${m[2]}/tracks`;
+  return null;
+}
+
+async function containerTracks(inst, path) {
+  const LIMIT = 100;
+  const first = (await inst.api.music(path, { limit: LIMIT })).data;
+  const out = [...(first.data || [])];
+  const total = first.meta && first.meta.total;
+  if (typeof total === 'number' && first.next) {    // the rest in parallel, by offset
+    const offsets = [];
+    for (let o = LIMIT; o < total; o += LIMIT) offsets.push(o);
+    const pages = await Promise.all(offsets.map((offset) => inst.api.music(path, { limit: LIMIT, offset })));
+    for (const r of pages) out.push(...((r.data && r.data.data) || []));
+  } else {
+    for (let next = first.next; next;) {
+      const r = (await inst.api.music(next)).data;
+      out.push(...(r.data || []));
+      next = r.next;
+    }
+  }
+  return out;
+}
+
+function withTimeout(promise, ms) {
+  let t;
+  return Promise.race([promise, new Promise((_, reject) => { t = setTimeout(() => reject(new Error('timeout')), ms); })])
+    .finally(() => clearTimeout(t));
+}
+
+function mixedQueueFix(inst) {
+  const setQueue = inst.setQueue;
+  if (typeof setQueue !== 'function' || setQueue.__agentMixed) return;
+  inst.setQueue = async function (opts, ...rest) {
+    const kinds = opts && typeof opts === 'object' ? QUEUE_KINDS.filter((k) => opts[k] != null && opts[k] !== '') : [];
+    const path = kinds.length > 1 && !opts.items && !opts.url ? containerTracksPath() : null;
+    if (!path) return setQueue.call(this, opts, ...rest);
+    const ids = new Set();
+    for (const k of kinds) for (const x of [].concat(opts[k])) ids.add(String(x && typeof x === 'object' ? x.id : x));
+    let items = null;
+    const t0 = Date.now();
+    try {
+      const tracks = await withTimeout(containerTracks(inst, path), 10000);
+      const found = tracks.filter((r) => r && ids.has(String(r.id)));
+      if (new Set(found.map((r) => String(r.id))).size === ids.size) items = found;
+      else log('mixed-kind queue: tracks not all in the container', found.length, 'of', ids.size);
+    } catch (e) { log('mixed-kind queue: container tracks', String(e)); }
+    if (!items) return setQueue.call(this, opts, ...rest);
+    const merged = { ...opts, items };
+    for (const k of kinds) delete merged[k];
+    log('mixed-kind queue:', kinds.join('+'), '->', items.length, 'items in order,', Date.now() - t0, 'ms');
+    return setQueue.call(this, merged, ...rest);
+  };
+  inst.setQueue.__agentMixed = true;
+}
+
 function hook(inst) {
   const mip = inst._mediaItemPlayback;
   const ar = mip && mip.services && mip.services.assetResolver;
@@ -102,6 +176,7 @@ function hook(inst) {
   };
 
   mk = inst;
+  if (cfg.mixedQueue) try { mixedQueueFix(inst); } catch (e) { log('mixedQueueFix', String(e)); }
   if (media._volKnown) adoptVolume(media._vol);
   log('hooked MusicKit', String(window.MusicKit.version));
   return true;
