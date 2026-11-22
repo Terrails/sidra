@@ -2,7 +2,7 @@
 // The parts run inside one closure, in the order AGENT_PARTS in src/agent/index.ts lists them,
 // and share its names; this one provides:
 //   the audio quality button in the player bar: qualityEnsure(), qualityRender(), quality
-//   (with the "engine not responding" badge next to it)
+//   (with the "engine not responding" / "engine not found" / "engine failed to start" badge next to it)
 
 // ---- audio quality button in the player bar ---------------------------------
 // (styles: assets/agent/style.css, inserted by the main process: the page CSP blocks our own <style>)
@@ -54,12 +54,19 @@ function qualityRender() {
     b.setAttribute('aria-label', 'Audio quality' + (row ? ': ' + row[2] : '') + (detail ? `, playing ${detail}` : ''));
   }
   if (quality.menu) for (const it of quality.menu.querySelectorAll('[data-q]')) it.setAttribute('aria-checked', String(it.dataset.q === q));
-  // the service's watchdog: an engine call has not returned within 5 s (agentHung in /status)
+  // the service's watchdog: an engine call has not returned within 5 s (agentHung in /status);
+  // the same badge says when there is no service to start (engine "missing", src/agent/index.ts)
+  // or when its start failed (engine "failed")
   const s = quality.stuck;
   if (s) {
+    const missing = !!(status && status.engine === 'missing');
+    const failed = !!(status && status.engine === 'failed');
     const hung = !!(status && status.agentHung);
-    s.hidden = !hung;
-    if (hung && status.agentPhase) s.title = `Stuck in ${status.agentPhase}`; else s.removeAttribute('title');
+    s.hidden = !hung && !missing && !failed;
+    s.textContent = missing ? 'Engine not found' : failed ? 'Engine failed to start' : 'Engine not responding';
+    if ((missing || failed) && status.error) s.title = String(status.error);
+    else if (hung && status.agentPhase) s.title = `Stuck in ${status.agentPhase}`;
+    else s.removeAttribute('title');
   }
 }
 

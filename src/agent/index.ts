@@ -16,7 +16,16 @@ import { isAllowedNavigationUrl } from "../musicService";
 import { getAssetPath } from "../paths";
 import { errorMessage, liveWebContents } from "../utils";
 import { commandPath } from "./commands";
-import { isRefused, PORT, request, startService, STOREFRONT } from "./service";
+import {
+  agentMissing,
+  findAgent,
+  isRefused,
+  PORT,
+  request,
+  startFailure,
+  startService,
+  STOREFRONT,
+} from "./service";
 
 const agentLog = log.scope("agent");
 const DEBUG = Boolean(process.env.AM_WEBUI_DEBUG);
@@ -128,7 +137,13 @@ async function poll(): Promise<void> {
     if (reply.status === 200 && reply.json)
       state = { engine: "ready", ...reply.json };
   } catch (err: unknown) {
-    if (isRefused(err) && !quitting) startService();
+    // No service to start, or its start failed: the page shows why (the badge next to
+    // the quality button).
+    if (isRefused(err) && !quitting) {
+      if (!startService()) state = { engine: "missing", error: agentMissing() };
+      else if (startFailure())
+        state = { engine: "failed", error: startFailure() };
+    }
   }
   polling = false;
   if (quitting) return;
@@ -203,9 +218,11 @@ export function initAgent(getMainWindow: () => BrowserWindow | null): void {
     } catch (err: unknown) {
       return {
         ok: false,
-        error: isRefused(err)
-          ? "The player engine is not running yet."
-          : errorMessage(err),
+        error: !isRefused(err)
+          ? errorMessage(err)
+          : !process.env.AM_WEBUI_NO_SPAWN && !findAgent()
+            ? agentMissing()
+            : (startFailure() ?? "The player engine is not running yet."),
       };
     }
   });
