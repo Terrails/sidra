@@ -11,7 +11,7 @@ class AgentMedia extends EventTarget {
       id: '', title: '', autoplay: false, controls: false, muted: false, loop: false, preload: 'metadata',
       playbackRate: 1, defaultPlaybackRate: 1, error: null, readyState: 0, networkState: 0,
       _src: '', _job: null, _gen: 0, _loaded: false, _paused: true, _ended: false, _seeking: false,
-      _pos: 0, _posAt: 0, _dur: NaN, _vol: 1, _volKnown: false, _volSetAt: 0, _volBusy: false, _volWant: null,
+      _pos: 0, _posAt: 0, _dur: NaN, _vol: 1, _volKnown: false, _volBusy: false, _volWant: null,
       _pending: null, _miss: 0, _stopped: 0, _endTimer: 0, _seekWant: null, _seekBusy: false, _attrs: new Map(),
     });
     setInterval(() => { if (this._loaded && !this._paused && !this._seeking) this._fire('timeupdate'); }, 250);
@@ -121,7 +121,6 @@ class AgentMedia extends EventTarget {
     // Until the service has told us its volume, the page's idea of it (a stored value, or
     // 100 %) must not reach the speakers: the service's value wins at start-up.
     if (!this._volKnown) return;
-    this._volSetAt = now();
     this._volWant = v;
     this._volPump();
   }
@@ -132,7 +131,6 @@ class AgentMedia extends EventTarget {
       const v = this._volWant;
       this._volWant = null;
       await send('volume', { v });
-      this._volSetAt = now();
     }
     this._volBusy = false;
   }
@@ -230,31 +228,19 @@ class AgentMedia extends EventTarget {
   }
 
   _onStatus(s) {
-    if (typeof s.volume === 'number') {
-      if (!this._volKnown) {
-        this._volKnown = true;
-        this._vol = s.volume;
-        adoptVolume(s.volume);
-      } else if (!this._volBusy && now() - this._volSetAt > 1500 && Math.abs(s.volume - this._vol) > 0.01) {
-        this._vol = s.volume;                          // changed from outside (amctl or another client)
-        adoptVolume(s.volume);
-        this._fire('volumechange');
-      }
+    if (typeof s.volume === 'number' && !this._volKnown) {   // the service's volume wins at start-up
+      this._volKnown = true;
+      this._vol = s.volume;
+      adoptVolume(s.volume);
     }
     if (!this._loaded || busy || now() - lastCmdAt < 400 || this._seeking) return;
     const job = this._job;
     const np = s.nowPlaying;
 
     if (!matches(s, job)) {
-      // The engine is on something else. Near the end of our track that is its own autoplay;
-      // otherwise somebody else started a track: leave it alone and show ours as paused.
-      if (++this._miss < 3) return;
-      const left = this._dur - this.currentTime;
-      if (!this._paused && left < 5) { this._finish('engine moved on'); return; }
-      log('engine plays something else; pausing our item');
-      this._loaded = false;
-      this.readyState = 0;
-      if (!this._paused) { this._paused = true; this._fire('pause'); }
+      // One player is assumed, so the engine leaving our track means it went on by itself
+      // (its autoplay at the end) or lost it (agent restart): either way our item is over.
+      if (++this._miss >= 3) this._finish('engine moved on');
       return;
     }
     this._miss = 0;

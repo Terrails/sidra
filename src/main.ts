@@ -24,7 +24,12 @@ import {
   getTrayStrings,
   NAV_LABELS_TOKEN,
 } from "./i18n";
-import { AGENT_ENABLED, initAgent, loadAgentAssets } from "./agent";
+import {
+  AGENT_ENABLED,
+  initAgent,
+  loadAgentAssets,
+  onDocumentReplaced,
+} from "./agent";
 import { getAssetPath, getDesktopId } from "./paths";
 import { Player, IntegrationContext } from "./player";
 import {
@@ -666,6 +671,7 @@ function setupNavigationHandlers(win: BrowserWindow, player: Player): void {
   win.webContents.on("did-navigate", (_event, url) => {
     rendererDocumentGeneration += 1;
     player.resetForDocumentReplacement();
+    if (AGENT_ENABLED) onDocumentReplaced();
     mainLog.debug("did-navigate:", url);
     handleStorefrontNavigation(url);
   });
