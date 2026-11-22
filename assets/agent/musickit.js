@@ -79,15 +79,25 @@ function containerTracksPath() {
   return null;
 }
 
+// all items of a paged endpoint (a container's tracks, the library's songs), in order
 async function containerTracks(inst, path) {
   const LIMIT = 100;
+  const PARALLEL = 8;                                  // a large library is hundreds of pages
   const first = (await inst.api.music(path, { limit: LIMIT })).data;
   const out = [...(first.data || [])];
   const total = first.meta && first.meta.total;
   if (typeof total === 'number' && first.next) {    // the rest in parallel, by offset
     const offsets = [];
     for (let o = LIMIT; o < total; o += LIMIT) offsets.push(o);
-    const pages = await Promise.all(offsets.map((offset) => inst.api.music(path, { limit: LIMIT, offset })));
+    const pages = new Array(offsets.length);
+    let i = 0;
+    const worker = async () => {
+      while (i < offsets.length) {
+        const k = i++;
+        pages[k] = await inst.api.music(path, { limit: LIMIT, offset: offsets[k] });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(PARALLEL, offsets.length) }, worker));
     for (const r of pages) out.push(...((r.data && r.data.data) || []));
   } else {
     for (let next = first.next; next;) {
@@ -96,6 +106,9 @@ async function containerTracks(inst, path) {
       next = r.next;
     }
   }
+  // MusicKit hands an HTTP error (429, 500) back as a body without data instead of throwing:
+  // the caller compares with the total when it needs every item
+  out.total = typeof total === 'number' ? total : null;
   return out;
 }
 

@@ -27,13 +27,15 @@ const KEEP_SERVICE = Boolean(process.env.AM_WEBUI_KEEP_SERVICE);
 const MIXED_QUEUE = Boolean(process.env.AM_WEBUI_MIXED_QUEUE);
 /** AM_WEBUI_UNRESTRICT=1: turn MusicKit's explicit-content restriction off (unrestrict()). */
 const UNRESTRICT = process.env.AM_WEBUI_UNRESTRICT === "1";
+/** A Shuffle button on Library > Songs for the whole library (shuffle.js); AM_WEBUI_LIBRARY_SHUFFLE=0 turns it off. */
+const LIBRARY_SHUFFLE = process.env.AM_WEBUI_LIBRARY_SHUFFLE !== "0";
 const QUIT_WAIT_MS = 3000;
 
 /** Playback always goes through the wrapper service in this build. */
 export const AGENT_ENABLED = true;
 
 /** The parts of the page hook, in the order they run (see assets/agent/hook.js). */
-const AGENT_PARTS = ["link", "media", "musickit", "quality", "start"];
+const AGENT_PARTS = ["link", "media", "musickit", "quality", "shuffle", "start"];
 
 /**
  * The page hook (assets/agent/hook.js with its parts in place of the token, plus the
@@ -43,7 +45,7 @@ export function loadAgentAssets(): { css: string; script: string } {
   const read = (name: string): string =>
     fs.readFileSync(getAssetPath("assets", "agent", name), "utf-8");
   const parts = AGENT_PARTS.map((p) => read(`${p}.js`)).join("\n");
-  const config = JSON.stringify({ storefront: STOREFRONT, debug: DEBUG, unrestrict: UNRESTRICT, mixedQueue: MIXED_QUEUE });
+  const config = JSON.stringify({ storefront: STOREFRONT, debug: DEBUG, unrestrict: UNRESTRICT, mixedQueue: MIXED_QUEUE, libraryShuffle: LIBRARY_SHUFFLE });
   const script = `${read("hook.js").replace("__AGENT_PARTS__", () => parts)}
 ;window.__amAgentInit && window.__amAgentInit(${config});`;
   return { css: read("style.css"), script };
