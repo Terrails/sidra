@@ -1,3 +1,14 @@
+> [!NOTE]
+> **This is the `wine-engine` branch, an unofficial fork of Sidra.** It plays catalogue songs
+> through the Wine engine of
+> [wine-engine-for-apple-music](https://github.com/Terrails/wine-engine-for-apple-music)
+> instead of the browser. What it
+> adds, what it needs and how to run it: **[README-agent.md](README-agent.md)**. Unofficial. Not
+> affiliated with, endorsed by or sponsored by Apple Inc. Everything below is upstream Sidra's
+> README, unchanged.
+
+---
+
 <h1 align="center">
   <img src="build/icon.png" width="256" height="256" alt="Sidra">
   <br />
