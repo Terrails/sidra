@@ -270,6 +270,14 @@ vi.mock("../src/contentReady", () => ({
 }));
 vi.mock("../src/notify", () => ({ initNotificationProbe: vi.fn() }));
 vi.mock("../src/utils/openExternal", () => ({ openExternalUrl: vi.fn() }));
+// The Wine-engine playback path (src/agent/) registers IPC handlers and polls a local
+// service; this suite covers Sidra's own bootstrap, so it stands in with the agent off.
+vi.mock("../src/agent", () => ({
+  AGENT_ENABLED: false,
+  initAgent: vi.fn(),
+  loadAgentAssets: vi.fn(() => ({ css: "", script: "" })),
+  onDocumentReplaced: vi.fn(),
+}));
 
 // Use the real module because it imports electron only as a type.
 // A partial stand-in can omit liveWebContents() and leave guarded paths untested.

@@ -24,6 +24,7 @@ import {
   getTrayStrings,
   NAV_LABELS_TOKEN,
 } from "./i18n";
+import { AGENT_ENABLED, initAgent, loadAgentAssets } from "./agent";
 import { getAssetPath, getDesktopId } from "./paths";
 import { Player, IntegrationContext } from "./player";
 import {
@@ -120,6 +121,8 @@ if (envLevel && VALID_LEVELS.has(envLevel as LogLevel)) {
 }
 
 const mainLog = log.scope("main");
+// AM_WEBUI_HIDDEN=1 keeps every window hidden, for headless tests over CDP.
+const HIDDEN = Boolean(process.env.AM_WEBUI_HIDDEN);
 const splashLog = log.scope("splash");
 mainLog.info(`${app.name} ${app.getVersion()}`);
 
@@ -242,6 +245,8 @@ export interface Assets {
   navBarScript: string;
   hookScript: string;
   fastQueueScript: string;
+  AGENT_CSS: string;
+  agentScript: string;
 }
 
 function createSplash(): {
@@ -272,7 +277,7 @@ function createSplash(): {
   splash.loadFile(getAssetPath("assets", "splash.html"), {
     query: { text: loadingText, lang: loadingLang },
   });
-  splash.show();
+  if (!HIDDEN) splash.show();
   splashLog.info("splash shown");
   splash.webContents.on("did-finish-load", () => {
     splash.webContents.setZoomFactor(getZoomFactor());
@@ -467,12 +472,16 @@ function loadAssets(): Assets {
     getAssetPath("assets", "fastPlaylistQueue.js"),
     "utf-8",
   );
+  // The page hook that hands playback to the wrapper service (src/agent/).
+  const { css: AGENT_CSS, script: agentScript } = loadAgentAssets();
   return {
     STYLE_FIX_CSS,
     authFrameScript,
     navBarScript,
     hookScript,
     fastQueueScript,
+    AGENT_CSS,
+    agentScript,
   };
 }
 
@@ -548,7 +557,7 @@ function setupSplashTransition(
   winReady: Promise<void>,
 ): void {
   Promise.all([minDisplay, cssReady, winReady]).then(() => {
-    win.show();
+    if (!HIDDEN) win.show();
     splashLog.info("splash closed");
     splash.close();
   });
@@ -600,6 +609,15 @@ async function injectRendererScripts(
   try {
     const currentUrl = win.webContents.getURL();
     if (isAllowedNavigationUrl(currentUrl)) {
+      if (AGENT_ENABLED) {
+        try {
+          // Before the MusicKit hook, so the first asset MusicKit resolves is already ours.
+          await win.webContents.executeJavaScript(assets.agentScript);
+          mainLog.debug("Agent hook injected");
+        } catch (e: unknown) {
+          mainLog.warn(`failed to inject agentScript ${context}:`, e);
+        }
+      }
       await win.webContents.executeJavaScript(
         assets.hookScript.replace("__SIDRA_DOCUMENT_GENERATION__", () =>
           String(rendererDocumentGeneration),
@@ -771,6 +789,7 @@ function setupContentHandlers(
     mainLog.info("page loaded:", win.webContents.getURL());
     win.webContents.setZoomFactor(getZoomFactor());
     await win.webContents.insertCSS(assets.STYLE_FIX_CSS);
+    if (AGENT_ENABLED) await win.webContents.insertCSS(assets.AGENT_CSS);
     mainLog.debug("CSS fixes injected");
     await injectThemeCss(win.webContents);
     await injectRendererScripts(win, assets, "on load");
@@ -821,7 +840,13 @@ function setupContentHandlers(
           ],
           [
             "wedgeDetector",
-            () => initWedgeDetector({ player, getMainWindow: () => win }),
+            () => {
+              // The detector skips a track whose position stalls for 5 s, a cure for
+              // Widevine wedges. The wrapper service plays here, and its slow track
+              // loads would look like a wedge; assets/agent/media.js handles its stalls.
+              if (AGENT_ENABLED) return;
+              initWedgeDetector({ player, getMainWindow: () => win });
+            },
           ],
           [
             "trayState",
@@ -901,6 +926,7 @@ if (gotLock) {
         contents.send(channel, ...args);
       });
       initControllerIPC(win);
+      if (AGENT_ENABLED) initAgent(() => win);
       setGetMainWindowCallback(() => win);
       initServiceSwitch({
         getTray: () => appTray,

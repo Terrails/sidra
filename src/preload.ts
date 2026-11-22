@@ -337,3 +337,18 @@ contextBridge.exposeInMainWorld("AMWrapper", {
     },
   },
 } satisfies AMWrapperBridge);
+
+// The player-service bridge for the page hook (assets/agent/). It is separate from AMWrapper
+// because it needs a reply (invoke) and a status stream, and only the top frame of
+// a service page gets it.
+if (window.top === window && /(^|\.)music\.apple\.com$/.test(location.hostname)) {
+  contextBridge.exposeInMainWorld("amAgent", {
+    cmd: (name: string, arg?: unknown) =>
+      ipcRenderer.invoke("agent:cmd", name, arg),
+    onStatus: (fn: (status: unknown) => void) => {
+      ipcRenderer.on("agent:status", (_event, status: unknown) => fn(status));
+    },
+    log: (line: unknown) =>
+      ipcRenderer.send("agent:log", String(line).slice(0, 2000)),
+  });
+}
