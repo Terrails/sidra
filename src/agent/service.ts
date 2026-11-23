@@ -303,3 +303,7 @@ export async function request(
 
 export const isRefused = (err: unknown): boolean =>
   (err as NodeJS.ErrnoException | null)?.code === "ECONNREFUSED";
+
+/** A request that got no answer within its time (request() rejects with this message). */
+export const isTimeout = (err: unknown): boolean =>
+  err instanceof Error && err.message === "timeout";

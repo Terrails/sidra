@@ -20,6 +20,7 @@ import {
   agentMissing,
   findAgent,
   isRefused,
+  isTimeout,
   PORT,
   request,
   startFailure,
@@ -151,56 +152,108 @@ export function onDocumentReplaced(): void {
  * AM_WEBUI_CROSSFADE says, once the engine's playback settings exist (seconds 0 before),
  * and with seamless transitions plus crossfade on, the engine's own autoplay off (MusicKit's
  * autoplay fills the queue; an engine that crossfades would fade into an unrelated track
- * before Sidra can pause it). Each at most once per connection. A service without these
- * settings (no crossfade / autoplay in its status) is left alone.
+ * before Sidra can pause it). Each is sent once per connection; a failed request (error or
+ * non-2xx) is repeated up to RETRY_MAX times in all, RETRY_MS apart, not on every poll.
+ * A service without these settings (no crossfade / autoplay in its status) is left alone.
  */
-const configured = { crossfade: false, autoplay: false };
+const RETRY_MS = 5000;
+const RETRY_MAX = 3;
+interface Setting {
+  done: boolean;
+  busy: boolean;
+  tries: number;
+  next: number;
+}
+const newSetting = (): Setting => ({ done: false, busy: false, tries: 0, next: 0 });
+let crossfadeSet = newSetting();
+let autoplaySet = newSetting();
+/** Whether the crossfade request changed the engine (else the status tells). */
+let crossfadeApplied = false;
+/** Counts connections, so an answer to a request of a lost one is ignored. */
+let connection = 0;
+/** Sidra turned the engine's autoplay off: stopEngine() turns it back on. A crash leaves it off. */
+let autoplayOff = false;
 
-function configure(state: Record<string, unknown>): void {
+function resetConfigured(): void {
+  connection += 1;
+  crossfadeSet = newSetting();
+  autoplaySet = newSetting();
+  crossfadeApplied = false;
+}
+
+/** No more attempts to make (done, or given up). */
+const settled = (s: Setting): boolean => s.done || (s.tries >= RETRY_MAX && !s.busy);
+
+function send(s: Setting, p: string, onDone?: () => void): void {
+  const conn = connection;
+  s.busy = true;
+  s.tries += 1;
+  s.next = Date.now() + RETRY_MS;
+  request("POST", p, 10_000)
+    .then((reply) => {
+      const ok = reply.status >= 200 && reply.status < 300;
+      agentLog[ok ? "info" : "warn"](`POST ${p} -> HTTP ${reply.status} (attempt ${s.tries})`);
+      if (ok && conn === connection) {
+        s.done = true;
+        onDone?.();
+      }
+    })
+    .catch((err: unknown) =>
+      agentLog.warn(`POST ${p} failed (attempt ${s.tries}): ${errorMessage(err)}`),
+    )
+    .finally(() => {
+      s.busy = false;
+    });
+}
+
+const mayTry = (s: Setting): boolean =>
+  !s.done && !s.busy && s.tries < RETRY_MAX && Date.now() >= s.next;
+
+export function configure(state: Record<string, unknown>): void {
   if (state.engine !== "ready" || state.ready !== true) {
-    configured.crossfade = configured.autoplay = false;
+    resetConfigured();
     return;
   }
-  const want: string[] = [];
   const xf = state.crossfade as { on?: unknown; seconds?: unknown } | undefined;
   const settings = !!xf && typeof xf === "object" && typeof xf.seconds === "number" && xf.seconds > 0;
-  if (CROSSFADE && settings && !configured.crossfade) {
-    configured.crossfade = true;
+  if (CROSSFADE && settings && !crossfadeSet.done) {
     if (
-      xf.on !== CROSSFADE.on ||
-      (CROSSFADE.seconds !== null && xf.seconds !== CROSSFADE.seconds)
+      xf.on === CROSSFADE.on &&
+      (CROSSFADE.seconds === null || xf.seconds === CROSSFADE.seconds)
     )
-      want.push(
+      crossfadeSet.done = true;
+    else if (mayTry(crossfadeSet))
+      send(
+        crossfadeSet,
         `/crossfade?on=${CROSSFADE.on ? 1 : 0}${CROSSFADE.seconds !== null ? `&s=${CROSSFADE.seconds}` : ""}`,
+        () => (crossfadeApplied = true),
       );
   }
-  // the crossfade as it is about to be: what was just asked for, else the engine's
-  const fadeOn = CROSSFADE ? CROSSFADE.on : xf?.on === true;
+  // the crossfade as it is about to be: what was just set, else the engine's
+  const fadeOn = CROSSFADE && crossfadeApplied ? CROSSFADE.on : xf?.on === true;
   if (
     SEAMLESS &&
-    !configured.autoplay &&
     settings &&
     fadeOn &&
     state.autoplay === true &&
-    Array.isArray(state.upNext)
+    Array.isArray(state.upNext) &&
+    (!CROSSFADE || settled(crossfadeSet)) &&
+    mayTry(autoplaySet)
   ) {
-    configured.autoplay = true;
-    want.push("/autoplay?on=0");
+    autoplayOff = true; // from the request on: it may have arrived even if its answer did not
+    send(autoplaySet, "/autoplay?on=0");
   }
-  for (const p of want)
-    request("POST", p, 10_000)
-      .then((reply) =>
-        agentLog.info(`POST ${p} -> HTTP ${reply.status}`),
-      )
-      .catch((err: unknown) =>
-        agentLog.warn(`POST ${p} failed: ${errorMessage(err)}`),
-      );
 }
 
-async function poll(): Promise<void> {
+/** Slow /status answers (timeouts) are held for this long before the engine is reported as starting. */
+const HUNG_MS = 60_000;
+let slowSince: number | null = null;
+
+export async function poll(): Promise<void> {
   if (polling || quitting) return;
   polling = true;
   let state: Record<string, unknown> = { engine: "starting" };
+  let held = false;
   try {
     const reply = await request("GET", "/status", 15_000);
     if (reply.status === 200 && reply.json)
@@ -208,14 +261,20 @@ async function poll(): Promise<void> {
   } catch (err: unknown) {
     // No service to start, or its start failed: the page shows why (the badge next to
     // the quality button).
-    if (isRefused(err) && !quitting) {
+    if (isTimeout(err) && lastStatus.engine === "ready") {
+      // A slow answer (a long /enqueue holds the engine) is not a lost connection: keep the
+      // last status and the settings, but not longer than HUNG_MS.
+      slowSince ??= Date.now();
+      held = Date.now() - slowSince < HUNG_MS;
+    } else if (isRefused(err) && !quitting) {
       if (!startService()) state = { engine: "missing", error: agentMissing() };
       else if (startFailure())
         state = { engine: "failed", error: startFailure() };
     }
   }
   polling = false;
-  if (quitting) return;
+  if (quitting || held) return;
+  slowSince = null;
   lastStatus = state;
   if (loading && state.playing === true) {
     const id = songIdOf(state);
@@ -241,17 +300,28 @@ async function playerCommand(
  * On quit, playback ends with Sidra: the service is asked to quit (it stops the
  * engine first), or with AM_WEBUI_KEEP_SERVICE only to stop. One player at a time
  * is assumed: this also stops what amctl or another client started.
- * Waits up to QUIT_WAIT_MS (a hung engine does not keep Sidra open).
+ * If Sidra turned the engine's autoplay off, it is turned back on after the stop (so it
+ * cannot start anything) and before the quit; a failure is only logged.
+ * Waits up to QUIT_WAIT_MS in all (a hung engine does not keep Sidra open).
  */
-async function stopEngine(): Promise<void> {
-  const what = KEEP_SERVICE ? "/stop" : "/quit";
-  try {
-    const reply = await request("POST", what, QUIT_WAIT_MS);
-    agentLog.info(`quit: POST ${what} -> HTTP ${reply.status}`);
-  } catch (err: unknown) {
-    if (!isRefused(err))
-      agentLog.warn(`quit: POST ${what} failed: ${errorMessage(err)}`);
+export async function stopEngine(): Promise<void> {
+  const start = Date.now();
+  const post = async (what: string, until: number): Promise<void> => {
+    try {
+      const reply = await request("POST", what, Math.max(300, until - Date.now()));
+      agentLog.info(`quit: POST ${what} -> HTTP ${reply.status}`);
+    } catch (err: unknown) {
+      if (!isRefused(err))
+        agentLog.warn(`quit: POST ${what} failed: ${errorMessage(err)}`);
+    }
+  };
+  if (autoplayOff) {
+    // A third of the budget for the two: the quit still needs its share.
+    await post("/stop", start + QUIT_WAIT_MS / 6);
+    await post("/autoplay?on=1", start + QUIT_WAIT_MS / 3);
+    autoplayOff = false;
   }
+  await post(KEEP_SERVICE ? "/stop" : "/quit", start + QUIT_WAIT_MS);
 }
 
 /**
@@ -262,6 +332,8 @@ export function initAgent(getMainWindow: () => BrowserWindow | null): void {
   getWindow = getMainWindow;
 
   ipcMain.handle("agent:cmd", async (event, cmd: unknown, arg: unknown) => {
+    // the page is still there while stopEngine() runs: it must not start anything after the stop
+    if (quitting) return { ok: false, error: "quitting" };
     const contents = liveWebContents(getWindow());
     if (
       !contents ||

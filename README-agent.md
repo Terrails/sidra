@@ -21,10 +21,13 @@ music.apple.com, exactly as in upstream Sidra. Everything else in this repositor
   Music videos, live radio and uploads without a catalogue ID still play in the page, as in
   upstream Sidra.
 - **Seamless transitions** between two catalogue songs that MusicKit plays one after the other:
-  gapless within an album; between albums the engine opens a new audio stream, which leaves
-  about 0.7-0.9 s of silence (the first track's own fade-out included) instead of the 1-3 s of a
-  new `/play`. `AM_WEBUI_CROSSFADE` sets the engine's crossfade, but under Wine the engine does
-  not crossfade (the agent's `KNOWN_ISSUES.md`): the next song starts at the end either way.
+  gapless between songs of the same audio format (always so with AAC in the cases tried); between
+  lossless songs of different formats the engine opens a new audio stream, which leaves about
+  0.2-0.9 s of silence (what the songs themselves have included) instead of the 1-3 s of a new `/play`.
+  `AM_WEBUI_CROSSFADE` sets the engine's crossfade, but the engine only crossfades AAC songs whose next song was
+  queued before they started (the agent's `KNOWN_ISSUES.md`), and Sidra queues it near the end: the
+  next song normally starts at the end either way. By the engine's behaviour a pause and resume in those last
+  seconds can make it start early (not tried with Sidra).
   Between 25 and 16 s before the end (plus the crossfade seconds) the next song
   is added to the engine's own queue ("Play Next", `POST /enqueue`), the engine goes on into it
   by itself, and MusicKit's next item takes over the track that is already playing instead of
@@ -157,8 +160,8 @@ Sidra's own settings (environment variables of the Sidra process):
 | `AM_WEBUI_PROFILE` | `${XDG_CONFIG_HOME:-~/.config}/sidra-wine-engine` | Electron profile (`run-with-agent.sh` only) |
 | `AM_WEBUI_DESKTOP_ID` | `sidra-wine-engine` (set by `run-with-agent.sh`; without the script Sidra's own ID) | desktop entry name, Wayland app_id, MPRIS and notification identity |
 | `AM_WEBUI_KEEP_SERVICE` | unset | any value (= `--keep-service`): on quit only stop playback, keep the service running |
-| `AM_WEBUI_SEAMLESS` | on | `0`: no seamless transitions, every queue item is loaded on its own and the engine paused at its end (above). On, while the engine's crossfade is on: also turns the engine's own autoplay off, once per connection (MusicKit's autoplay fills the queue; an engine that crossfades would fade into its own pick before Sidra can pause it). The engine keeps that setting, also for other clients |
-| `AM_WEBUI_CROSSFADE` | unset (the engine's setting) | `0`: crossfade off; `1` to `12`: crossfade on, that many seconds. Set in the engine (`POST /crossfade`, which keeps it) once its playback settings exist, at start-up and whenever the service comes back; anything else is logged and ignored. Only between songs that go on seamlessly, and under Wine without audible effect at present |
+| `AM_WEBUI_SEAMLESS` | on | `0`: no seamless transitions, every queue item is loaded on its own and the engine paused at its end (above). On, while the engine's crossfade is on: also turns the engine's own autoplay off, once per connection (MusicKit's autoplay fills the queue; an engine that crossfades would fade into its own pick before Sidra can pause it). If Sidra turned it off, it turns it back on at quit (after `/stop`, before `/quit`; also with `AM_WEBUI_KEEP_SERVICE`; best effort within the 3 s quit budget); autoplay that was off already is left off. After a crash it stays off. A failed `/crossfade` or `/autoplay` is retried 5 s apart, three attempts per connection. A slow `/status` (a long `/enqueue` holds the engine) keeps the connection for up to 60 s |
+| `AM_WEBUI_CROSSFADE` | unset (the engine's setting) | `0`: crossfade off; `1` to `12`: crossfade on, that many seconds. Set in the engine (`POST /crossfade`, which keeps it) once its playback settings exist, at start-up and whenever the service comes back; anything else is logged and ignored. Only between songs that go on seamlessly, and at present normally without audible effect (above) |
 | `AM_WEBUI_LIBRARY_SHUFFLE` | on | `0`: no Shuffle button on Library > Songs |
 | `AM_WEBUI_MIXED_QUEUE` | off | any value: play lists that mix songs and music videos (above) |
 | `AM_WEBUI_UNRESTRICT` | off | `1`: turn MusicKit's explicit-content restriction off (above) |
@@ -214,8 +217,8 @@ crossfade seconds (`POST /enqueue`, song and album as for `/play`); not later th
 it, or a slow `/enqueue` could outlast the track. Once the engine's
 status shows it first in `upNext`, the track is not paused at the end: the engine goes on by
 itself, and when its status shows the new song (`songId`, `queueItemId`), the item ends. That is
-at the nominal end (an engine that crossfaded would switch the crossfade seconds earlier; under
-Wine it does not). MusicKit then loads its next
+at the nominal end (an engine that crossfades switches some seconds earlier; it normally does
+not, as the item is queued too late for that). MusicKit then loads its next
 item, and `play()` takes over the track the engine already plays, with position and duration from
 the status, instead of sending `/play`. On every status the item is checked against MusicKit's
 next item again; when that changes (a queue edit, shuffle or repeat toggle, a skip, a new queue)
@@ -227,8 +230,8 @@ pause at the end applies again. An item whose `/enqueue` answered without a
 Without a confirmed next item (the last one, a music video next, an older service, a failed
 `/enqueue`), the old pause at the end applies; with one, the pause stays as a fallback 4 s past
 the end, and twelve statuses (instead of three) without the track count as its end. `/enqueue`
-holds up the service's status for about 0.7-1.4 s (about 13 s for a song the album page does
-not have, about 20 s at worst); statuses are not acted on while a command runs, and it is sent
+takes about 0.7-1.4 s (about 11-13 s for a song the album page does not have, about 20 s at worst)
+and holds up the other commands (an older service also its status); statuses are not acted on while a command runs, and it is sent
 well before the end.
 
 ## Testing with the mock
@@ -245,11 +248,11 @@ AM_AGENT_DIR=/path/to/wine-engine-for-apple-music npm run test:agent
 
 It checks: the hook attaches and the quality button appears; play, pause, seek + resume, next;
 seamless transitions (crossfade and then the engine's autoplay set at start-up; with crossfade on,
-which the mock ignores like the engine, and off, the next song takes over at the end without
+which the mock ignores, and off, the next song takes over at the end without
 `/play` or `/pause`; a skip while the next song is queued; the old pause at the end with a mock
 without the queue API);
 the "Engine not responding" badge shows and clears; a page reload pauses playback, also a track
-that is still loading; quitting Sidra sends `POST /quit`; without a service to start, the badge
+that is still loading; quitting Sidra sends `/stop`, `/autoplay?on=1` and `POST /quit`; without a service to start, the badge
 says "Engine not found" (no path in the page) and the reason is logged; with a stand-in `bin/amd`
 that exits 1, the badge says "Engine failed to start" and its output is in `amd-start.log`; and
 with `AM_WEBUI_AGENT=0` the page runs without the hook and without `window.amAgent` (upstream
@@ -296,8 +299,8 @@ are unchanged in either case.
   out, or browser playback).
 - **Gapless only with the queue API.** With a service without it, and wherever seamless
   transitions do not apply (above), every track is loaded on its own: the gap between tracks is
-  the engine's load time, about 1-3 s. Between albums a seamless transition still has about
-  0.7-0.9 s of silence, and crossfade has no effect under Wine.
+  the engine's load time, about 1-3 s. Between lossless songs of different formats a seamless transition still has
+  about 0.2-0.9 s of silence, and crossfade normally has no effect (above).
 - **One player at a time.** Whatever the engine plays is taken to be this page's: a reload pauses
   it, quitting Sidra stops it, also when another client (for example the agent's `bin/amctl`)
   started it. Changes made by another client while Sidra plays (track, volume) are not followed.
