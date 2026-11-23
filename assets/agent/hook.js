@@ -12,9 +12,9 @@
 //
 // The code is split into parts under assets/agent/ that run inside the one closure below
 // (src/agent/index.ts puts them in place of the token): link.js (commands to the service and
-// its status), media.js (the <audio> stand-in), musickit.js (the MusicKit hooks), quality.js
-// (the quality button), shuffle.js (Shuffle on Library > Songs), start.js (waiting for
-// MusicKit, status updates).
+// its status), media.js (the <audio> stand-in), musickit.js (the MusicKit hooks), seamless.js
+// (MusicKit's next song queued in the engine), quality.js (the quality button), shuffle.js
+// (Shuffle on Library > Songs), start.js (waiting for MusicKit, status updates).
 (() => {
   if (window.__amAgentInit) return;
   window.__amAgentInit = (cfg) => {

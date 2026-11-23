@@ -4,6 +4,12 @@
 # Sidra profiles or your desktop entries.
 #   hook     the MusicKit hook attaches and the quality button appears
 #   player   play, pause, seek + resume, next                    (test/agent-smoke.js)
+#   seamless two consecutive engine songs (test/agent-smoke-seamless.js): AM_WEBUI_CROSSFADE and
+#            then the engine's autoplay set at start-up; with crossfade on (which the engine, and
+#            so the mock, ignores under Wine) and off, the second song takes over at the end
+#            without /play or /pause; a skip while the second is queued plays it and takes it
+#            out of the engine's queue; a mock without the queue API (POST /mock/seamless?on=0)
+#            gets the old pause at the end and /play
 #   badge    the "engine not responding" badge (the mock's POST /mock/hang) shows and clears
 #   reload   a page reload pauses playback, also a track that is still loading
 #   quit     quitting Sidra (SIGTERM) sends POST /quit to the service
@@ -66,12 +72,15 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'FAIL=1; exit 130' INT TERM
-sed -e "s/__SONG1__/$SONG1/g" -e "s/__SONG2__/$SONG2/g" "$T/agent-smoke.js" > "$TMP/agent-smoke.js"
+for f in agent-smoke.js agent-smoke-seamless.js; do
+    sed -e "s/__SONG1__/$SONG1/g" -e "s/__SONG2__/$SONG2/g" "$T/$f" > "$TMP/$f"
+done
 
 # The service writes its API token into the prefix; the mock accepts "mocktoken".
 mkdir -p "$TMP/prefix/drive_c/users/x/AppData/Local/AppleMusicWrapper"
 printf mocktoken > "$TMP/prefix/drive_c/users/x/AppData/Local/AppleMusicWrapper/token"
-node "$MOCK_JS" "$PORT" > "$TMP/mock.log" 2>&1 &
+# MOCK_AUTOPLAY=1: with crossfade on, Sidra must turn the engine's autoplay off (seamless phase)
+MOCK_AUTOPLAY=1 node "$MOCK_JS" "$PORT" > "$TMP/mock.log" 2>&1 &
 MOCK=$!
 sleep 0.5
 kill -0 "$MOCK" 2>/dev/null || { head -5 "$TMP/mock.log"; echo "agent-smoke: mock service did not start (port $PORT busy? SMOKE_PORT=...)"; exit 1; }
@@ -105,6 +114,9 @@ wait_page() {
 # the mock's agent watchdog: hang (call name $1) or recover (no argument)
 mock_hang() { curl -s -m 5 -X POST -H "Authorization: Bearer mocktoken" "http://127.0.0.1:$PORT/mock/hang?call=$1" > /dev/null; }
 
+# a POST to the mock ($1: path and query)
+mock_post() { curl -s -m 5 -X POST -H "Authorization: Bearer mocktoken" "http://127.0.0.1:$PORT$1" > /dev/null; }
+
 # the mock's playing/paused state and song ID
 mock_state() { curl -s -m 5 -H "Authorization: Bearer mocktoken" "http://127.0.0.1:$PORT/status" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d);console.log(s.playing?"playing":s.paused?"paused":"stopped",s.nowPlaying?.songId??"-")})'; }
 
@@ -116,6 +128,39 @@ check() {
     for pat in "$@"; do
         echo "$out" | grep -q -- "$pat" || { echo "  $name: FAILED, missing: $pat"; FAIL=1; }
     done
+}
+
+# a seamless-transition scenario on DevTools port $1 (test/agent-smoke-seamless.js in mode $2,
+# reported as $3). Each pattern after them must appear in the page's report, or with a leading
+# + in what the mock saw after the scenario's first /play, or with a leading - must not.
+check_seam() {
+    port=$1 mode=$2 name=$3; shift 3
+    sed "s/__MODE__/$mode/g" "$TMP/agent-smoke-seamless.js" > "$TMP/seam-$name.js"
+    mark=$(wc -l < "$TMP/mock.log")
+    out=$(timeout 90 node "$T/cdp.mjs" "$port" "$TMP/seam-$name.js" 2>&1)
+    echo "  $name: $out"
+    saw=$(tail -n +$((mark + 1)) "$TMP/mock.log" | sed -n "/POST \/play?.*song=$SONG1/,\$p" | tail -n +2)
+    for pat in "$@"; do
+        case $pat in
+        +*) echo "$saw" | grep -q -- "${pat#+}" || { echo "  $name: FAILED, the service did not see: ${pat#+}"; FAIL=1; };;
+        -*) ! echo "$saw" | grep -q -- "${pat#-}" || { echo "  $name: FAILED, the service saw: ${pat#-}"; FAIL=1; };;
+        *) echo "$out" | grep -q -- "$pat" || { echo "  $name: FAILED, missing: $pat"; FAIL=1; };;
+        esac
+    done
+    node "$T/cdp.mjs" "$port" -e 'MusicKit.getInstance().stop().then(() => 1)' > /dev/null; sleep 1
+}
+
+check_seamless() {
+    if grep -q "POST /crossfade?on=1&s=6" "$TMP/mock.log" && grep -q "POST /autoplay?on=0" "$TMP/mock.log"; then
+        echo "  seamless: crossfade set from AM_WEBUI_CROSSFADE, the engine's autoplay turned off"
+    else echo "  seamless: FAILED, no POST /crossfade?on=1&s=6 or /autoplay?on=0 at start-up"; FAIL=1; fi
+    check_seam "$1" end crossfade 'item=second state=2' 'left=[01]\.' '+POST /enqueue?.*song='"$SONG2" '+crossfade on, no effect) into' '-POST /play' '-POST /pause'
+    mock_post "/crossfade?on=0"
+    check_seam "$1" end gapless 'item=second state=2' 'left=[01]\.' '+POST /enqueue?.*song='"$SONG2" '+end, gapless into' '-POST /play' '-POST /pause'
+    check_seam "$1" skip skip 'item=second state=2' '+POST /enqueue' '+POST /play?.*song='"$SONG2" '+POST /dequeue?id='
+    mock_post "/mock/seamless?on=0"
+    check_seam "$1" end fallback 'item=second state=2' '+POST /pause' '+POST /play?.*song='"$SONG2" '-POST /enqueue'
+    mock_post "/mock/seamless?on=1"
 }
 
 # the page on DevTools port $1 shows a hung engine (expression $2 true) and clears it again
@@ -154,10 +199,11 @@ check_quit() {
 }
 
 echo "Sidra against the mock service:"
-sidra sidra-profile "$CDP" sidra.log AM_PORT="$PORT" AM_WEBUI_NO_SPAWN=1
+sidra sidra-profile "$CDP" sidra.log AM_PORT="$PORT" AM_WEBUI_NO_SPAWN=1 AM_WEBUI_CROSSFADE=6
 if wait_page "$CDP" "$HOOKED" 120; then
     echo "  hook: attached, quality button shown"
     check "$CDP" "$TMP/agent-smoke.js" player 'state=2 item=' 'paused state=3' 'after seek t=6' 'next item='
+    check_seamless "$CDP"
     check_hung "$CDP" '!!document.querySelector(".amagent-stuck:not([hidden])")?.offsetParent'
     check_reload "$CDP"
     check_quit sidra-profile

@@ -12,7 +12,7 @@ class AgentMedia extends EventTarget {
       playbackRate: 1, defaultPlaybackRate: 1, error: null, readyState: 0, networkState: 0,
       _src: '', _job: null, _gen: 0, _loaded: false, _paused: true, _ended: false, _seeking: false,
       _pos: 0, _posAt: 0, _dur: NaN, _vol: 1, _volKnown: false, _volBusy: false, _volWant: null,
-      _pending: null, _miss: 0, _stopped: 0, _endTimer: 0, _seekWant: null, _seekBusy: false, _attrs: new Map(),
+      _pending: null, _miss: 0, _stopped: 0, _endTimer: 0, _endHand: false, _seekWant: null, _seekBusy: false, _attrs: new Map(),
     });
     setInterval(() => { if (this._loaded && !this._paused && !this._seeking) this._fire('timeupdate'); }, 250);
   }
@@ -32,6 +32,7 @@ class AgentMedia extends EventTarget {
   get currentSrc() { return this._src; }
   set src(v) {
     v = String(v || '');
+    if (seam.enq && seam.enq.gen === this._gen) seamDrop('item replaced');   // skip, previous, a new queue
     this._src = v;
     this._gen++;
     this._loaded = false;
@@ -162,12 +163,15 @@ class AgentMedia extends EventTarget {
 
     if (this._pending) { this._paused = false; return this._pending; }
     this._paused = false;
+    // the engine went on into this item by itself (seamless.js): take over what plays
+    const adopt = seamAdopt(job);
     this._pending = (async () => {
-      log('play', job);
-      const r = await send('play', { song: job.song, album: job.album, storefront: job.cc }, () => gen !== this._gen);
+      log(adopt ? 'adopt' : 'play', job);
+      const r = adopt ? (status.paused ? await send('resume') : { ok: true })
+        : await send('play', { song: job.song, album: job.album, storefront: job.cc }, () => gen !== this._gen);
       if (gen !== this._gen) throw aborted();
       if (!r.ok) throw this._fail(r.error || 'The player engine could not start this track.');
-      const s = await waitStatus((x) => x.playing && matches(x, job), 15000);
+      const s = adopt && status.playing && matches(status, job) ? status : await waitStatus((x) => x.playing && matches(x, job), 15000);
       if (gen !== this._gen) throw aborted();
       if (!s) throw this._fail('The player engine did not start this track.');
       this._pending = null;
@@ -213,8 +217,9 @@ class AgentMedia extends EventTarget {
     this._fire('pause');
   }
 
-  // the track is over (or about to be): MusicKit moves on to the next queue item
-  _finish(why) {
+  // the track is over (or about to be): MusicKit moves on to the next queue item. handed: the
+  // engine went on into that item itself (seamless.js), so it plays on
+  _finish(why, handed) {
     if (!this._loaded) return;
     log('ended', why);
     clearTimeout(this._endTimer);
@@ -223,7 +228,13 @@ class AgentMedia extends EventTarget {
     this._paused = true;
     this._ended = true;
     if (Number.isFinite(this._dur)) this._pos = this._dur;
-    send('pause');           // keep the engine from continuing with a track of its own choosing
+    if (handed) {
+      seam.handoff = { song: seam.enq.song, at: now() };
+      seam.enq = null;
+    } else {
+      send('pause');         // keep the engine from continuing with a track of its own choosing
+      seamDrop('ended without hand-over');
+    }
     this._fire('ended');
   }
 
@@ -233,14 +244,21 @@ class AgentMedia extends EventTarget {
       this._vol = s.volume;
       adoptVolume(s.volume);
     }
+    seamStatus(s, this);
     if (!this._loaded || busy || now() - lastCmdAt < 400 || this._seeking) return;
     const job = this._job;
     const np = s.nowPlaying;
 
+    // before matches(): its title/duration fallback can take the next song for this one
+    if (seamHanded(s, this._gen, job)) { this._finish('handed over to ' + np.songId, true); return; }
+    // with the next item in the engine's queue, the engine may show no track or a stopped one
+    // for a moment while it moves on: more statuses are allowed before the item counts as over
+    const ready = seamReady(s, this._gen);
+    const patience = ready ? 12 : 3;
     if (!matches(s, job)) {
       // One player is assumed, so the engine leaving our track means it went on by itself
       // (its autoplay at the end) or lost it (agent restart): either way our item is over.
-      if (++this._miss >= 3) this._finish('engine moved on');
+      if (++this._miss >= patience) this._finish('engine moved on');
       return;
     }
     this._miss = 0;
@@ -255,14 +273,21 @@ class AgentMedia extends EventTarget {
     if (s.paused && !this._paused) { this._paused = true; this._fire('pause'); }
     else if (s.playing && this._paused) { this._paused = false; this._ended = false; this._fire('playing'); }
     else if (!s.playing && !s.paused && !this._paused) {         // stopped by itself
-      if (++this._stopped >= 3) this._finish('engine stopped');
+      if (++this._stopped >= patience) this._finish('engine stopped');
       return;
     }
     this._stopped = 0;
 
+    seamCheck(s, this, job);
+    // armed for a hand-over that is off now (the item was dropped): armed again for the pause
+    if (this._endTimer && this._endHand && !seamReady(s, this._gen)) { clearTimeout(this._endTimer); this._endTimer = 0; }
     if (!this._paused && !this._endTimer && Number.isFinite(this._dur)) {
       const leftMs = (this._dur - this._pos) * 1000;
-      if (leftMs < 1500) this._endTimer = setTimeout(() => { this._endTimer = 0; this._finish('end of track'); }, Math.max(0, leftMs - END_CUT_MS));
+      // with MusicKit's next item next in the engine's queue, the engine goes on by itself and
+      // the hand-over above ends this item; the pause at the end is only kept as a fallback
+      // for an engine that does not (SEAM_GRACE_MS late)
+      const handOver = this._endHand = seamReady(s, this._gen);
+      if (leftMs < 1500) this._endTimer = setTimeout(() => { this._endTimer = 0; this._finish(handOver ? 'end of track, no hand-over' : 'end of track'); }, Math.max(0, handOver ? leftMs + SEAM_GRACE_MS : leftMs - END_CUT_MS));
     }
   }
 }

@@ -17,7 +17,8 @@
 #   AM_WEBUI_PROFILE      Electron profile (default ${XDG_CONFIG_HOME:-~/.config}/sidra-wine-engine)
 #   AM_WEBUI_DESKTOP_ID   desktop entry and Wayland app_id (default sidra-wine-engine)
 #   AM_WEBUI_AGENT=0, AM_WEBUI_UNRESTRICT=1, AM_WEBUI_DEBUG=1, AM_WEBUI_HIDDEN=1,
-#   AM_WEBUI_NO_SPAWN=1, AM_WEBUI_MIXED_QUEUE=1, AM_WEBUI_LIBRARY_SHUFFLE=0
+#   AM_WEBUI_NO_SPAWN=1, AM_WEBUI_MIXED_QUEUE=1, AM_WEBUI_LIBRARY_SHUFFLE=0, AM_WEBUI_SEAMLESS=0
+#   AM_WEBUI_CROSSFADE    0 (off) or 1 to 12 (seconds): the engine's crossfade
 # The desktop entry keeps the settings of the run that wrote it (see below).
 # Other arguments go to Electron (e.g. --remote-debugging-port=9342 --mute-audio).
 PREPARE_ONLY=

@@ -15,7 +15,7 @@ import fs from "fs";
 import { isAllowedNavigationUrl } from "../musicService";
 import { getAssetPath } from "../paths";
 import { errorMessage, liveWebContents } from "../utils";
-import { commandPath } from "./commands";
+import { commandPath, crossfadeSetting } from "./commands";
 import {
   agentMissing,
   findAgent,
@@ -38,6 +38,21 @@ const MIXED_QUEUE = Boolean(process.env.AM_WEBUI_MIXED_QUEUE);
 const UNRESTRICT = process.env.AM_WEBUI_UNRESTRICT === "1";
 /** A Shuffle button on Library > Songs for the whole library (shuffle.js); AM_WEBUI_LIBRARY_SHUFFLE=0 turns it off. */
 const LIBRARY_SHUFFLE = process.env.AM_WEBUI_LIBRARY_SHUFFLE !== "0";
+/**
+ * Seamless transitions (seamless.js): MusicKit's next song is queued in the engine before the
+ * end, so the engine goes on gapless (or with crossfade). Only with a service that has the
+ * queue API (status.upNext); AM_WEBUI_SEAMLESS=0 turns it off.
+ */
+const SEAMLESS = process.env.AM_WEBUI_SEAMLESS !== "0";
+/** AM_WEBUI_CROSSFADE: unset leaves the engine's setting, 0 off, 1 to 12 seconds (crossfadeSetting()). */
+const CROSSFADE = ((): ReturnType<typeof crossfadeSetting> => {
+  try {
+    return crossfadeSetting(process.env.AM_WEBUI_CROSSFADE);
+  } catch (err: unknown) {
+    agentLog.warn(`${errorMessage(err)}: leaving the engine's setting`);
+    return null;
+  }
+})();
 const QUIT_WAIT_MS = 3000;
 
 /**
@@ -47,7 +62,7 @@ const QUIT_WAIT_MS = 3000;
 export const AGENT_ENABLED = process.env.AM_WEBUI_AGENT !== "0";
 
 /** The parts of the page hook, in the order they run (see assets/agent/hook.js). */
-const AGENT_PARTS = ["link", "media", "musickit", "quality", "shuffle", "start"];
+const AGENT_PARTS = ["link", "media", "musickit", "seamless", "quality", "shuffle", "start"];
 
 /**
  * The page hook (assets/agent/hook.js with its parts in place of the token, plus the
@@ -57,7 +72,7 @@ export function loadAgentAssets(): { css: string; script: string } {
   const read = (name: string): string =>
     fs.readFileSync(getAssetPath("assets", "agent", name), "utf-8");
   const parts = AGENT_PARTS.map((p) => read(`${p}.js`)).join("\n");
-  const config = JSON.stringify({ storefront: STOREFRONT, debug: DEBUG, unrestrict: UNRESTRICT, mixedQueue: MIXED_QUEUE, libraryShuffle: LIBRARY_SHUFFLE });
+  const config = JSON.stringify({ storefront: STOREFRONT, debug: DEBUG, unrestrict: UNRESTRICT, mixedQueue: MIXED_QUEUE, libraryShuffle: LIBRARY_SHUFFLE, seamless: SEAMLESS });
   const script = `${read("hook.js").replace("__AGENT_PARTS__", () => parts)}
 ;window.__amAgentInit && window.__amAgentInit(${config});`;
   return { css: read("style.css"), script };
@@ -131,6 +146,57 @@ export function onDocumentReplaced(): void {
   if (pending) abandon(pending);
 }
 
+/**
+ * Once the service is ready (at start-up and after it was restarted): crossfade as
+ * AM_WEBUI_CROSSFADE says, once the engine's playback settings exist (seconds 0 before),
+ * and with seamless transitions plus crossfade on, the engine's own autoplay off (MusicKit's
+ * autoplay fills the queue; an engine that crossfades would fade into an unrelated track
+ * before Sidra can pause it). Each at most once per connection. A service without these
+ * settings (no crossfade / autoplay in its status) is left alone.
+ */
+const configured = { crossfade: false, autoplay: false };
+
+function configure(state: Record<string, unknown>): void {
+  if (state.engine !== "ready" || state.ready !== true) {
+    configured.crossfade = configured.autoplay = false;
+    return;
+  }
+  const want: string[] = [];
+  const xf = state.crossfade as { on?: unknown; seconds?: unknown } | undefined;
+  const settings = !!xf && typeof xf === "object" && typeof xf.seconds === "number" && xf.seconds > 0;
+  if (CROSSFADE && settings && !configured.crossfade) {
+    configured.crossfade = true;
+    if (
+      xf.on !== CROSSFADE.on ||
+      (CROSSFADE.seconds !== null && xf.seconds !== CROSSFADE.seconds)
+    )
+      want.push(
+        `/crossfade?on=${CROSSFADE.on ? 1 : 0}${CROSSFADE.seconds !== null ? `&s=${CROSSFADE.seconds}` : ""}`,
+      );
+  }
+  // the crossfade as it is about to be: what was just asked for, else the engine's
+  const fadeOn = CROSSFADE ? CROSSFADE.on : xf?.on === true;
+  if (
+    SEAMLESS &&
+    !configured.autoplay &&
+    settings &&
+    fadeOn &&
+    state.autoplay === true &&
+    Array.isArray(state.upNext)
+  ) {
+    configured.autoplay = true;
+    want.push("/autoplay?on=0");
+  }
+  for (const p of want)
+    request("POST", p, 10_000)
+      .then((reply) =>
+        agentLog.info(`POST ${p} -> HTTP ${reply.status}`),
+      )
+      .catch((err: unknown) =>
+        agentLog.warn(`POST ${p} failed: ${errorMessage(err)}`),
+      );
+}
+
 async function poll(): Promise<void> {
   if (polling || quitting) return;
   polling = true;
@@ -156,6 +222,7 @@ async function poll(): Promise<void> {
     if (!id || id === loading) loading = null;
   }
   checkAbandoned(state);
+  configure(state);
   liveWebContents(getWindow())?.send("agent:status", state);
 }
 

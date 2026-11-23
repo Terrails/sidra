@@ -3,7 +3,7 @@
 import { net } from "electron";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { commandPath } from "../src/agent/commands";
+import { commandPath, crossfadeSetting } from "../src/agent/commands";
 
 const fetchMock = vi.mocked(net.fetch);
 
@@ -96,5 +96,51 @@ describe("commandPath", () => {
 
   it.each(["aac", "lossless", "hires"])("sets quality %s", async (q) => {
     expect(await commandPath("quality", { q })).toBe(`/quality?q=${q}`);
+  });
+
+  it("enqueues a song like play, without queue=single", async () => {
+    expect(await commandPath("enqueue", { song: "617154366", album: "617154241", storefront: "gb" })).toBe(
+      "/enqueue?album=617154241&song=617154366&storefront=gb",
+    );
+    fetchMock.mockResolvedValue(lookupReply([{ trackId: 4343, collectionId: 78 }]));
+    expect(await commandPath("enqueue", { song: "4343" })).toBe("/enqueue?album=78&song=4343&storefront=us");
+  });
+
+  it.each([
+    [{ song: "1&x=2", album: "2" }],
+    [{ song: 1, album: "2" }],
+    [{ song: "1", album: "2/../quit" }],
+    [{}],
+  ])("refuses enqueue with %j", async (arg) => {
+    await expect(commandPath("enqueue", arg)).rejects.toThrow("unknown player command");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("dequeues one queue item or everything after the current one", async () => {
+    expect(await commandPath("dequeue", {})).toBe("/dequeue");
+    expect(await commandPath("dequeue", { id: "1234567890" })).toBe("/dequeue?id=1234567890");
+  });
+
+  it.each([[{ id: "" }], [{ id: "1&x=2" }], [{ id: "1/../quit" }], [{ id: 5 }], [{ id: "q102" }], [{ id: "1".repeat(21) }]])(
+    "refuses dequeue with %j",
+    async (arg) => {
+      await expect(commandPath("dequeue", arg)).rejects.toThrow("unknown player command");
+    },
+  );
+});
+
+describe("crossfadeSetting", () => {
+  it.each([[undefined], [""], ["  "]])("leaves the engine's setting for %j", (raw) => {
+    expect(crossfadeSetting(raw)).toBeNull();
+  });
+
+  it("turns crossfade off with 0 and on with 1 to 12 seconds", () => {
+    expect(crossfadeSetting("0")).toEqual({ on: false, seconds: null });
+    expect(crossfadeSetting("1")).toEqual({ on: true, seconds: 1 });
+    expect(crossfadeSetting(" 12 ")).toEqual({ on: true, seconds: 12 });
+  });
+
+  it.each(["13", "-1", "1.5", "on", "6s", "100"])("refuses %j", (raw) => {
+    expect(() => crossfadeSetting(raw)).toThrow("AM_WEBUI_CROSSFADE");
   });
 });
