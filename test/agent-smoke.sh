@@ -12,7 +12,8 @@
 #            gets the old pause at the end and /play
 #   badge    the "engine not responding" badge (the mock's POST /mock/hang) shows and clears
 #   reload   a page reload pauses playback, also a track that is still loading
-#   quit     quitting Sidra (SIGTERM) sends POST /quit to the service
+#   quit     quitting Sidra (SIGTERM) sends POST /quit to the service, after a /stop and the
+#            engine's autoplay turned back on (Sidra turned it off at start-up)
 #   missing  without a service to start, the badge says "Engine not found" (no path in the page)
 #   failed   a service whose bin/amd exits at once: the badge says "Engine failed to start" and
 #            its output is in Sidra's log directory (amd-start.log)
@@ -104,10 +105,34 @@ sidra() {
 wait_page() {
     i=0
     while [ $i -lt "$3" ]; do
-        [ "$(node "$T/cdp.mjs" "$1" -e "$2" 2>/dev/null)" = "true" ] && return 0
+        [ "$(timeout 10 node "$T/cdp.mjs" "$1" -e "$2" 2>/dev/null)" = "true" ] && return 0
         if [ -f "$SIDRA_DONE" ]; then echo "  Sidra exited (code $(cat "$SIDRA_DONE"))"; return 1; fi
         sleep 1; i=$((i + 1))
     done
+    return 1
+}
+
+# wait until the page on DevTools port $1 has settled (up to $2 s): the hook is attached, the
+# player usable (MusicKit.getInstance()) and the same document at the same URL for SETTLE_SECS
+# consecutive seconds. The page navigates again shortly after the hook first shows (us to ie),
+# which replaces the document and the hook with it. Prints why on failure.
+SETTLE_SECS=${SMOKE_SETTLE_SECS:-4}
+SETTLED='(() => { try { if (!(HOOKED_EXPR && MusicKit.getInstance())) return "not ready"; return "ready " + (window.__smokeDoc ||= Math.random().toString(36).slice(2)) + " " + location.href; } catch (e) { return "not ready"; } })()'
+wait_settled() {
+    expr=$(printf '%s' "$SETTLED" | sed "s/HOOKED_EXPR/$(printf '%s' "$HOOKED" | sed 's/[&|\\]/\\&/g')/")
+    i=0 same=0 last=
+    while [ $i -lt "$2" ]; do
+        cur=$(timeout 10 node "$T/cdp.mjs" "$1" -e "$expr" 2>/dev/null)
+        case $cur in
+        ready*) if [ "$cur" = "$last" ]; then same=$((same + 1)); else same=1; [ -n "$last" ] && echo "  page changed while settling: $cur"; fi
+                last=$cur
+                [ $same -ge "$SETTLE_SECS" ] && return 0;;
+        *) same=0 last=;;
+        esac
+        if [ -f "$SIDRA_DONE" ]; then echo "  Sidra exited (code $(cat "$SIDRA_DONE"))"; return 1; fi
+        sleep 1; i=$((i + 1))
+    done
+    echo "  page did not settle within $2 s (last: ${cur:-no answer}; needed $SETTLE_SECS s of the same document)"
     return 1
 }
 
@@ -176,7 +201,8 @@ check_hung() {
 # a reload pauses what the page plays, and a track still loading when the page goes away is
 # paused once it starts
 HOOKED='!!window.__amAgentHooked && !!document.querySelector(".amagent-quality")'
-reload_page() { node "$T/cdp.mjs" "$1" -e 'setTimeout(() => location.reload(), 50), 1' > /dev/null; sleep 1; wait_page "$1" "$HOOKED" 60; }
+settle_reload() { sleep 1; wait_settled "$1" 60 || { echo "  reload: FAILED, page did not come back"; FAIL=1; }; }
+reload_page() { node "$T/cdp.mjs" "$1" -e 'setTimeout(() => location.reload(), 50), 1' > /dev/null; settle_reload "$1"; }
 expect_state() {
     sleep "$2"; got=$(mock_state)
     case "$got" in "$3"*) echo "  reload: $4: $got";; *) echo "  reload: FAILED, $4: $got, expected $3"; FAIL=1;; esac
@@ -186,7 +212,7 @@ check_reload() {
     expect_state "$1" 3 playing "page playing"
     reload_page "$1"; expect_state "$1" 1 paused "page reloaded"
     node "$T/cdp.mjs" "$1" -e '(async () => { const mk = MusicKit.getInstance(); await mk.setQueue({ songs: ["'"$SONG1"'"] }); mk.play(); setTimeout(() => location.reload(), 300); return 1; })()' > /dev/null
-    sleep 1; wait_page "$1" "$HOOKED" 60; expect_state "$1" 2 "paused $SONG1" "reloaded while loading"
+    settle_reload "$1"; expect_state "$1" 2 "paused $SONG1" "reloaded while loading"
 }
 
 # quit Sidra's main process like a session logout or Ctrl+C would: the service gets POST /quit
@@ -194,14 +220,17 @@ check_quit() {
     pkill -TERM -o -f -- "--user-data-dir=$TMP/$1"
     i=0; while [ $i -lt 10 ] && pgrep -f "$TMP/$1" > /dev/null; do sleep 1; i=$((i + 1)); done
     if pgrep -f "$TMP/$1" > /dev/null; then echo "  quit: FAILED, still running"; FAIL=1
-    elif tail -n 3 "$TMP/mock.log" | grep -q "POST /quit"; then echo "  quit: service asked to quit"
-    else echo "  quit: FAILED, no POST /quit"; FAIL=1; fi
+    elif ! tail -n 3 "$TMP/mock.log" | grep -q "POST /quit"; then echo "  quit: FAILED, no POST /quit"; FAIL=1
+    # Sidra turned the engine's autoplay off (seamless phase): back on between the stop and the quit
+    elif [ "$(tail -n 3 "$TMP/mock.log" | sed 's/^.* POST //' | tr '\n' ' ')" = "/stop /autoplay?on=1 /quit " ]; then
+        echo "  quit: autoplay turned back on after the stop, service asked to quit"
+    else echo "  quit: FAILED, expected /stop, /autoplay?on=1, /quit at the end"; FAIL=1; fi
 }
 
 echo "Sidra against the mock service:"
 sidra sidra-profile "$CDP" sidra.log AM_PORT="$PORT" AM_WEBUI_NO_SPAWN=1 AM_WEBUI_CROSSFADE=6
-if wait_page "$CDP" "$HOOKED" 120; then
-    echo "  hook: attached, quality button shown"
+if wait_page "$CDP" "$HOOKED" 120 && wait_settled "$CDP" 60; then
+    echo "  hook: attached, quality button shown, page settled"
     check "$CDP" "$TMP/agent-smoke.js" player 'state=2 item=' 'paused state=3' 'after seek t=6' 'next item='
     check_seamless "$CDP"
     check_hung "$CDP" '!!document.querySelector(".amagent-stuck:not([hidden])")?.offsetParent'
