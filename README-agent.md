@@ -24,10 +24,6 @@ music.apple.com, exactly as in upstream Sidra. Everything else in this repositor
   gapless between songs of the same audio format (always so with AAC in the cases tried); between
   lossless songs of different formats the engine opens a new audio stream, which leaves about
   0.2-0.9 s of silence (what the songs themselves have included) instead of the 1-3 s of a new `/play`.
-  `AM_WEBUI_CROSSFADE` sets the engine's crossfade, but the engine only crossfades AAC songs whose next song was
-  queued before they started (the agent's `KNOWN_ISSUES.md`), and Sidra queues it near the end: the
-  next song normally starts at the end either way. By the engine's behaviour a pause and resume in those last
-  seconds can make it start early (not tried with Sidra).
   Between 25 and 16 s before the end (plus the crossfade seconds) the next song
   is added to the engine's own queue ("Play Next", `POST /enqueue`), the engine goes on into it
   by itself, and MusicKit's next item takes over the track that is already playing instead of
@@ -36,6 +32,14 @@ music.apple.com, exactly as in upstream Sidra. Everything else in this repositor
   needs a service with the queue API (`upNext` in its status); with an older one, with
   repeat-one, before a music video and after the last item, tracks are loaded one at a time as
   before. On by default, `AM_WEBUI_SEAMLESS=0` turns it off.
+- **Crossfade** (`AM_WEBUI_CROSSFADE`, or the engine's own setting) with AAC only: the engine
+  crossfades a song only when the next one was queued before it started (the agent's
+  `KNOWN_ISSUES.md`). With the quality set to AAC and crossfade on, Sidra therefore queues the next
+  two songs early in a track, the second one with `at=end` ("Add to Queue"). The first change after
+  a new `/play` is normally not crossfaded. Only one song is queued when MusicKit's list does not
+  show the one after it (end of the queue, repeat-all wrap) or it is the same song again, or when
+  the next song is short. Songs of the same album are, by the engine's code, not crossfaded (not
+  measured); they go on gaplessly.
 - **Quality button** (AAC / Lossless / Hi-Res) in the player bar. It sets the floor the engine
   asks for (`POST /quality`), and its colour compares what is playing with that floor
   (AAC < Lossless < Hi-Res; Dolby Atmos, spatial and surround count as AAC): green when the
@@ -161,7 +165,7 @@ Sidra's own settings (environment variables of the Sidra process):
 | `AM_WEBUI_DESKTOP_ID` | `sidra-wine-engine` (set by `run-with-agent.sh`; without the script Sidra's own ID) | desktop entry name, Wayland app_id, MPRIS and notification identity |
 | `AM_WEBUI_KEEP_SERVICE` | unset | any value (= `--keep-service`): on quit only stop playback, keep the service running |
 | `AM_WEBUI_SEAMLESS` | on | `0`: no seamless transitions, every queue item is loaded on its own and the engine paused at its end (above). On, while the engine's crossfade is on: also turns the engine's own autoplay off, once per connection (MusicKit's autoplay fills the queue; an engine that crossfades would fade into its own pick before Sidra can pause it). If Sidra turned it off, it turns it back on at quit (after `/stop`, before `/quit`; also with `AM_WEBUI_KEEP_SERVICE`; best effort within the 3 s quit budget); autoplay that was off already is left off. After a crash it stays off. A failed `/crossfade` or `/autoplay` is retried 5 s apart, three attempts per connection. A slow `/status` (a long `/enqueue` holds the engine) keeps the connection for up to 60 s |
-| `AM_WEBUI_CROSSFADE` | unset (the engine's setting) | `0`: crossfade off; `1` to `12`: crossfade on, that many seconds. Set in the engine (`POST /crossfade`, which keeps it) once its playback settings exist, at start-up and whenever the service comes back; anything else is logged and ignored. Only between songs that go on seamlessly, and at present normally without audible effect (above) |
+| `AM_WEBUI_CROSSFADE` | unset (the engine's setting) | `0`: crossfade off; `1` to `12`: crossfade on, that many seconds. Set in the engine (`POST /crossfade`, which keeps it) once its playback settings exist, at start-up and whenever the service comes back; anything else is logged and ignored. Only between songs that go on seamlessly, and only with the quality set to AAC (above) |
 | `AM_WEBUI_LIBRARY_SHUFFLE` | on | `0`: no Shuffle button on Library > Songs |
 | `AM_WEBUI_MIXED_QUEUE` | off | any value: play lists that mix songs and music videos (above) |
 | `AM_WEBUI_UNRESTRICT` | off | `1`: turn MusicKit's explicit-content restriction off (above) |
@@ -213,12 +217,12 @@ Seamless transitions (`assets/agent/seamless.js`) change the end of a track when
 a queue API. While a catalogue song plays, MusicKit's next item (`mk.queue.nextPlayableItem`, so
 repeat-all, shuffle order and MusicKit's autoplay items count; not with repeat-one or when
 MusicKit stops after the item) is added to the engine's queue once, 25 s before the end plus the
-crossfade seconds (`POST /enqueue`, song and album as for `/play`); not later than 16 s before
+crossfade seconds (earlier with AAC and crossfade, see below; `POST /enqueue`, song and album as for `/play`); not later than 16 s before
 it, or a slow `/enqueue` could outlast the track. Once the engine's
 status shows it first in `upNext`, the track is not paused at the end: the engine goes on by
 itself, and when its status shows the new song (`songId`, `queueItemId`), the item ends. That is
-at the nominal end (an engine that crossfades switches some seconds earlier; it normally does
-not, as the item is queued too late for that). MusicKit then loads its next
+at the nominal end (an engine that crossfades switches up to the crossfade seconds earlier, which
+also ends the item; the list of queued songs then moves on by one). MusicKit then loads its next
 item, and `play()` takes over the track the engine already plays, with position and duration from
 the status, instead of sending `/play`. On every status the item is checked against MusicKit's
 next item again; when that changes (a queue edit, shuffle or repeat toggle, a skip, a new queue)
@@ -230,9 +234,15 @@ pause at the end applies again. An item whose `/enqueue` answered without a
 Without a confirmed next item (the last one, a music video next, an older service, a failed
 `/enqueue`), the old pause at the end applies; with one, the pause stays as a fallback 4 s past
 the end, and twelve statuses (instead of three) without the track count as its end. `/enqueue`
-takes about 0.7-1.4 s (about 11-13 s for a song the album page does not have, about 20 s at worst)
+takes about 0.7-2.6 s (about 11-13 s for a song the album page does not have, about 20 s at worst)
 and holds up the other commands (an older service also its status); statuses are not acted on while a command runs, and it is sent
-well before the end.
+well before the end. A failed `/enqueue` is not retried for that track.
+
+With AAC and crossfade on, the next song is added once the track has played for the crossfade
+seconds plus 3 s, at least 3 s after the last command, and the one after it once `upNext` lists the
+first. A pause or skip can wait behind such an `/enqueue`. When the first leaves the engine's queue,
+so does the second. Without "Add to Queue" in the app (500 `80004001`), only one song is queued from
+then on, near the end as above.
 
 ## Testing with the mock
 
@@ -300,7 +310,7 @@ are unchanged in either case.
 - **Gapless only with the queue API.** With a service without it, and wherever seamless
   transitions do not apply (above), every track is loaded on its own: the gap between tracks is
   the engine's load time, about 1-3 s. Between lossless songs of different formats a seamless transition still has
-  about 0.2-0.9 s of silence, and crossfade normally has no effect (above).
+  about 0.2-0.9 s of silence, and crossfade only has an effect with AAC (above).
 - **One player at a time.** Whatever the engine plays is taken to be this page's: a reload pauses
   it, quitting Sidra stops it, also when another client (for example the agent's `bin/amctl`)
   started it. Changes made by another client while Sidra plays (track, volume) are not followed.

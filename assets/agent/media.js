@@ -32,7 +32,6 @@ class AgentMedia extends EventTarget {
   get currentSrc() { return this._src; }
   set src(v) {
     v = String(v || '');
-    if (seam.enq && seam.enq.gen === this._gen) seamDrop('item replaced');   // skip, previous, a new queue
     this._src = v;
     this._gen++;
     this._loaded = false;
@@ -57,6 +56,7 @@ class AgentMedia extends EventTarget {
         if (this._job.durMs) this._dur = this._job.durMs / 1000;
       } catch { this._job = null; }
     }
+    seamSource(this._job);
   }
 
   get paused() { return this._paused; }
@@ -165,9 +165,10 @@ class AgentMedia extends EventTarget {
     this._paused = false;
     // the engine went on into this item by itself (seamless.js): take over what plays
     const adopt = seamAdopt(job);
+    if (!adopt) seamDrop('not taken over');
     this._pending = (async () => {
       log(adopt ? 'adopt' : 'play', job);
-      const r = adopt ? (status.paused ? await send('resume') : { ok: true })
+      const r = adopt ? await (status.paused ? send('resume') : { ok: true })   // always yields, so that _pending is set before it is cleared
         : await send('play', { song: job.song, album: job.album, storefront: job.cc }, () => gen !== this._gen);
       if (gen !== this._gen) throw aborted();
       if (!r.ok) throw this._fail(r.error || 'The player engine could not start this track.');
@@ -200,6 +201,7 @@ class AgentMedia extends EventTarget {
     log('failed:', message);
     this._pending = null;
     this._paused = true;
+    seamDrop('failed');
     this.error = { code: 4, message, MEDIA_ERR_SRC_NOT_SUPPORTED: 4 };
     this._fire('error');
     return new DOMException(message, 'NotSupportedError');
@@ -229,8 +231,7 @@ class AgentMedia extends EventTarget {
     this._ended = true;
     if (Number.isFinite(this._dur)) this._pos = this._dur;
     if (handed) {
-      seam.handoff = { song: seam.enq.song, at: now() };
-      seam.enq = null;
+      seam.handoff = { song: seam.q.shift().song, at: now() };
     } else {
       send('pause');         // keep the engine from continuing with a track of its own choosing
       seamDrop('ended without hand-over');
@@ -250,10 +251,15 @@ class AgentMedia extends EventTarget {
     const np = s.nowPlaying;
 
     // before matches(): its title/duration fallback can take the next song for this one
-    if (seamHanded(s, this._gen, job)) { this._finish('handed over to ' + np.songId, true); return; }
+    if (seamHanded(s, job)) {
+      if (seamAhead(s) && this._paused && !s.playing) return;   // paused behind the early switch: handed over on resume
+      this._finish('handed over to ' + np.songId, true);
+      return;
+    }
+    if (seamPassed(s)) { this._finish('engine skipped an item'); return; }
     // with the next item in the engine's queue, the engine may show no track or a stopped one
     // for a moment while it moves on: more statuses are allowed before the item counts as over
-    const ready = seamReady(s, this._gen);
+    const ready = seamReady(s);
     const patience = ready ? 12 : 3;
     if (!matches(s, job)) {
       // One player is assumed, so the engine leaving our track means it went on by itself
@@ -280,13 +286,13 @@ class AgentMedia extends EventTarget {
 
     seamCheck(s, this, job);
     // armed for a hand-over that is off now (the item was dropped): armed again for the pause
-    if (this._endTimer && this._endHand && !seamReady(s, this._gen)) { clearTimeout(this._endTimer); this._endTimer = 0; }
+    if (this._endTimer && this._endHand && !seamReady(s)) { clearTimeout(this._endTimer); this._endTimer = 0; }
     if (!this._paused && !this._endTimer && Number.isFinite(this._dur)) {
       const leftMs = (this._dur - this._pos) * 1000;
       // with MusicKit's next item next in the engine's queue, the engine goes on by itself and
       // the hand-over above ends this item; the pause at the end is only kept as a fallback
       // for an engine that does not (SEAM_GRACE_MS late)
-      const handOver = this._endHand = seamReady(s, this._gen);
+      const handOver = this._endHand = seamReady(s);
       if (leftMs < 1500) this._endTimer = setTimeout(() => { this._endTimer = 0; this._finish(handOver ? 'end of track, no hand-over' : 'end of track'); }, Math.max(0, handOver ? leftMs + SEAM_GRACE_MS : leftMs - END_CUT_MS));
     }
   }

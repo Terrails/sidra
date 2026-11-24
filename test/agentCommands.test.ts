@@ -106,6 +106,24 @@ describe("commandPath", () => {
     expect(await commandPath("enqueue", { song: "4343" })).toBe("/enqueue?album=78&song=4343&storefront=us");
   });
 
+  it.each(["next", "end"])("passes at=%s to enqueue", async (at) => {
+    expect(await commandPath("enqueue", { song: "617154366", album: "617154241", storefront: "gb", at })).toBe(
+      `/enqueue?album=617154241&song=617154366&storefront=gb&at=${at}`,
+    );
+  });
+
+  it("ignores at for play", async () => {
+    expect(await commandPath("play", { song: "1", album: "2", storefront: "gb", at: "end" })).toBe(
+      "/play?album=2&song=1&storefront=gb&queue=single",
+    );
+  });
+
+  it.each([["x"], [""], [5], ["end&x=1"]])("refuses enqueue with at=%j without a lookup", async (at) => {
+    await expect(commandPath("enqueue", { song: "1", at })).rejects.toThrow("unknown player command");
+    await expect(commandPath("enqueue", { song: "1", album: "2", at })).rejects.toThrow("unknown player command");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it.each([
     [{ song: "1&x=2", album: "2" }],
     [{ song: 1, album: "2" }],

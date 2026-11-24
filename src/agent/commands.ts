@@ -51,12 +51,17 @@ export async function commandPath(
 ): Promise<string> {
   if (SIMPLE.has(cmd)) return `/${cmd}`;
   if (cmd === "play" || cmd === "enqueue") {
+    // enqueue: at=next (Play Next, the service's default) or at=end (Add to Queue)
+    if (cmd === "enqueue" && arg.at != null && arg.at !== "next" && arg.at !== "end")
+      throw new Error("unknown player command");
     const query = await songQuery(arg);
     // queue=single: MusicKit keeps the queue here and asks for one song at a time, so
     // the service must not queue the rest of the album (its default). enqueue adds the
-    // song after the current one (seamless.js), which plays on.
+    // song to the queue (seamless.js), which plays on.
     if (query)
-      return cmd === "play" ? `/play?${query}&queue=single` : `/enqueue?${query}`;
+      return cmd === "play"
+        ? `/play?${query}&queue=single`
+        : `/enqueue?${query}${arg.at != null ? `&at=${arg.at}` : ""}`;
   }
   // the service's queue item IDs are numbers (UINT64), like catalogue IDs
   if (cmd === "dequeue" && (arg.id == null || isId(arg.id)))
