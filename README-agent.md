@@ -36,7 +36,7 @@ music.apple.com, exactly as in upstream Sidra. Everything else in this repositor
   before. On by default, `AM_WEBUI_SEAMLESS=0` turns it off.
 - **Crossfade** (`AM_WEBUI_CROSSFADE`, or the engine's own setting) with AAC only: the engine
   crossfades a song only when the next one was queued before it started (the agent's
-  `KNOWN_ISSUES.md`). With the quality set to AAC and crossfade on, Sidra therefore queues the next
+  `docs/api.md`, "Queue and seamless playback"). With the quality set to AAC and crossfade on, Sidra therefore queues the next
   two songs early in a track, the second one with `at=end` ("Add to Queue"). A new `/play` (a pick
   from a list, a new queue) takes the next song along (`next=`): the engine queues it and pauses
   and plays the new song once, so its first change is crossfaded too; it starts about 1-3 s later.
