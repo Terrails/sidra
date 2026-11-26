@@ -5,8 +5,8 @@
 #   hook     the MusicKit hook attaches and the quality button appears
 #   player   play, pause, seek + resume, next                    (test/agent-smoke.js)
 #   seamless two consecutive engine songs (test/agent-smoke-seamless.js): AM_WEBUI_CROSSFADE and
-#            then the engine's autoplay set at start-up; with crossfade on (which the engine, and
-#            so the mock, ignores under Wine) and off, the second song takes over at the end
+#            then the engine's autoplay set at start-up; with crossfade on (which the mock ignores:
+#            the next song starts at the end) and off, the second song takes over at the end
 #            without /play or /pause (with AAC and crossfade the /play takes the second song
 #            along, next=, instead of an /enqueue); a skip while the second is queued moves the engine on into
 #            it with /next (no /play or /dequeue); a mock without the queue API (POST /mock/seamless?on=0)

@@ -1,6 +1,7 @@
 // src/agent/index.ts: configure() (crossfade / autoplay set once per connection, retried when
-// it fails), slow /status answers, and the autoplay restore at quit. The service module is
-// replaced; the settings are read when index.ts loads, so each test loads a fresh copy.
+// it fails), slow /status answers, and the autoplay restore at quit (and after a crash). The
+// service and config modules are replaced; the settings are read when index.ts loads, so each
+// test loads a fresh copy.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const requestMock = vi.hoisted(() => vi.fn());
@@ -14,6 +15,13 @@ vi.mock("../src/agent/service", () => ({
   startFailure: () => null,
   startService: () => true,
   STOREFRONT: "us",
+}));
+
+/** The stored marker: Sidra turned the engine's autoplay off (survives a load(), like a crash). */
+const marker = vi.hoisted(() => ({ off: false }));
+vi.mock("../src/config", () => ({
+  getAgentAutoplayOff: () => marker.off,
+  setAgentAutoplayOff: (off: boolean) => (marker.off = off),
 }));
 
 const ENV = ["AM_WEBUI_CROSSFADE", "AM_WEBUI_SEAMLESS", "AM_WEBUI_KEEP_SERVICE"] as const;
@@ -50,6 +58,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   requestMock.mockReset();
   requestMock.mockImplementation(() => ok());
+  marker.off = false;
 });
 
 afterEach(() => {
@@ -293,6 +302,78 @@ describe("poll and the page", () => {
     vi.setSystemTime(Date.now() + 61_000);
     await step(timeout);
     expect(sent).toEqual(["starting", "ready", "ready"]);
+  });
+});
+
+describe("autoplay after a crash", () => {
+  it("marks autoplay as turned off from the request on", async () => {
+    requestMock.mockImplementationOnce(timeout);
+    const { configure } = await load();
+    configure(status());
+    await flush();
+    expect(marker.off).toBe(true);
+  });
+
+  it("turns it back on at the next start when that start does not turn it off", async () => {
+    marker.off = true;
+    let m = await load({ AM_WEBUI_CROSSFADE: "0" });
+    m.configure(status({ crossfade: { on: false, seconds: 6 }, autoplay: false }));
+    await flush();
+    m.configure(status({ crossfade: { on: false, seconds: 6 }, autoplay: false })); // status not updated yet
+    await flush();
+    expect(posts()).toEqual(["/autoplay?on=1"]);
+    expect(marker.off).toBe(false);
+    marker.off = true;
+    m = await load({ AM_WEBUI_SEAMLESS: "0" });
+    m.configure(status({ autoplay: false }));
+    await flush();
+    expect(posts()).toEqual(["/autoplay?on=1", "/autoplay?on=1"]);
+    expect(marker.off).toBe(false);
+  });
+
+  it("waits for the crossfade being set before it decides", async () => {
+    marker.off = true;
+    const { configure } = await load({ AM_WEBUI_CROSSFADE: "0" });
+    configure(status({ autoplay: false })); // crossfade still on in the engine
+    await flush();
+    expect(posts()).toEqual(["/crossfade?on=0"]);
+    configure(status({ crossfade: { on: false, seconds: 6 }, autoplay: false }));
+    await flush();
+    expect(posts()).toEqual(["/crossfade?on=0", "/autoplay?on=1"]);
+  });
+
+  it("keeps the mark while the restore fails, and drops it when autoplay is on anyway", async () => {
+    marker.off = true;
+    requestMock.mockImplementation(() => ok(500));
+    const { configure } = await load({ AM_WEBUI_SEAMLESS: "0" });
+    configure(status({ autoplay: false }));
+    await flush();
+    expect(posts()).toEqual(["/autoplay?on=1"]);
+    expect(marker.off).toBe(true);
+    configure(status({ autoplay: true }));
+    await flush();
+    expect(posts()).toEqual(["/autoplay?on=1"]);
+    expect(marker.off).toBe(false);
+  });
+
+  it("restores it at quit when the next start keeps it off", async () => {
+    marker.off = true;
+    const { configure, stopEngine } = await load();
+    configure(status({ autoplay: false }));
+    await flush();
+    expect(posts()).toEqual([]);
+    await stopEngine();
+    expect(posts()).toEqual(["/stop", "/autoplay?on=1", "/quit"]);
+    expect(marker.off).toBe(false);
+  });
+
+  it("keeps the mark when the restore at quit fails", async () => {
+    const { configure, stopEngine } = await load();
+    configure(status());
+    await flush();
+    requestMock.mockImplementation((_m: string, p: string) => (p === "/autoplay?on=1" ? ok(500) : ok()));
+    await stopEngine();
+    expect(marker.off).toBe(true);
   });
 });
 

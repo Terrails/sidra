@@ -12,6 +12,7 @@
 import { app, ipcMain, type BrowserWindow } from "electron";
 import log from "electron-log/main";
 import fs from "fs";
+import { getAgentAutoplayOff, setAgentAutoplayOff } from "../config";
 import { isAllowedNavigationUrl } from "../musicService";
 import { getAssetPath } from "../paths";
 import { errorMessage, liveWebContents } from "../utils";
@@ -171,8 +172,18 @@ let autoplaySet = newSetting();
 let crossfadeApplied = false;
 /** Counts connections, so an answer to a request of a lost one is ignored. */
 let connection = 0;
-/** Sidra turned the engine's autoplay off: stopEngine() turns it back on. A crash leaves it off. */
+/** Sidra turned the engine's autoplay off: stopEngine() turns it back on. */
 let autoplayOff = false;
+/**
+ * The same, kept in the config until autoplay is on again, so that a start after a crash
+ * turns it back on when it does not turn it off itself (configure()).
+ */
+let autoplayMarked = getAgentAutoplayOff();
+
+function markAutoplayOff(off: boolean): void {
+  autoplayOff = off;
+  if (autoplayMarked !== off) setAgentAutoplayOff((autoplayMarked = off));
+}
 
 function resetConfigured(): void {
   connection += 1;
@@ -232,16 +243,21 @@ export function configure(state: Record<string, unknown>): void {
   // the crossfade as it is about to be: what was just set, else the engine's
   const fadeOn = CROSSFADE && crossfadeApplied ? CROSSFADE.on : xf?.on === true;
   if (
-    SEAMLESS &&
-    settings &&
-    fadeOn &&
-    state.autoplay === true &&
-    Array.isArray(state.upNext) &&
-    (!CROSSFADE || settled(crossfadeSet)) &&
-    mayTry(autoplaySet)
-  ) {
-    autoplayOff = true; // from the request on: it may have arrived even if its answer did not
-    send(autoplaySet, "/autoplay?on=0");
+    !settings ||
+    typeof state.autoplay !== "boolean" ||
+    !Array.isArray(state.upNext) ||
+    (CROSSFADE && !settled(crossfadeSet))
+  )
+    return;
+  if (SEAMLESS && fadeOn) {
+    if (state.autoplay && mayTry(autoplaySet)) {
+      markAutoplayOff(true); // from the request on: it may have arrived even if its answer did not
+      send(autoplaySet, "/autoplay?on=0");
+    } else if (!state.autoplay && autoplayMarked) autoplayOff = true; // off since a crash: quit restores it
+  } else if (autoplayMarked) {
+    // a run that crashed turned it off, and this one does not want it off
+    if (state.autoplay) markAutoplayOff(false);
+    else if (mayTry(autoplaySet)) send(autoplaySet, "/autoplay?on=1", () => markAutoplayOff(false));
   }
 }
 
@@ -301,25 +317,27 @@ async function playerCommand(
  * engine first), or with AM_WEBUI_KEEP_SERVICE only to stop. One player at a time
  * is assumed: this also stops what amctl or another client started.
  * If Sidra turned the engine's autoplay off, it is turned back on after the stop (so it
- * cannot start anything) and before the quit; a failure is only logged.
+ * cannot start anything) and before the quit; after a failure the next start does it.
  * Waits up to QUIT_WAIT_MS in all (a hung engine does not keep Sidra open).
  */
 export async function stopEngine(): Promise<void> {
   const start = Date.now();
-  const post = async (what: string, until: number): Promise<void> => {
+  const post = async (what: string, until: number): Promise<boolean> => {
     try {
       const reply = await request("POST", what, Math.max(300, until - Date.now()));
       agentLog.info(`quit: POST ${what} -> HTTP ${reply.status}`);
+      return reply.status >= 200 && reply.status < 300;
     } catch (err: unknown) {
       if (!isRefused(err))
         agentLog.warn(`quit: POST ${what} failed: ${errorMessage(err)}`);
+      return false;
     }
   };
   if (autoplayOff) {
     // A third of the budget for the two: the quit still needs its share.
     await post("/stop", start + QUIT_WAIT_MS / 6);
-    await post("/autoplay?on=1", start + QUIT_WAIT_MS / 3);
-    autoplayOff = false;
+    if (await post("/autoplay?on=1", start + QUIT_WAIT_MS / 3)) markAutoplayOff(false);
+    else autoplayOff = false; // the next start tries again
   }
   await post(KEEP_SERVICE ? "/stop" : "/quit", start + QUIT_WAIT_MS);
 }

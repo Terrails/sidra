@@ -82,7 +82,9 @@ music.apple.com, exactly as in upstream Sidra. Everything else in this repositor
   Quitting Sidra (window closed, tray "Quit", SIGTERM/Ctrl+C; not close-to-tray) asks the
   service to quit (`POST /quit`, waiting at most 3 s so a hung engine does not keep Sidra open);
   `--keep-service` / `AM_WEBUI_KEEP_SERVICE=1` only stops playback (`POST /stop`) and leaves the
-  service running for the next start.
+  service running for the next start. The engine answers `/quit` at once even while an `/enqueue`
+  runs (which then stops), but a running `/enqueue` holds `/stop` and `/autoplay`: they still run
+  when it is done, up to about 20 s later, and with `--keep-service` the music plays until then.
 - **Transfer-music tip freeze workaround.** music.apple.com stores when it first showed its
   "Transfer music" tip (localStorage `transfer-music-bubble-tip-first-view-*`). Once that
   timestamp is more than 7 days old, the page's renderer spins a few seconds after load and grows
@@ -175,7 +177,7 @@ Sidra's own settings (environment variables of the Sidra process):
 | `AM_WEBUI_PROFILE` | `${XDG_CONFIG_HOME:-~/.config}/sidra-wine-engine` | Electron profile (`run-with-agent.sh` only) |
 | `AM_WEBUI_DESKTOP_ID` | `sidra-wine-engine` (set by `run-with-agent.sh`; without the script Sidra's own ID) | desktop entry name, Wayland app_id, MPRIS and notification identity |
 | `AM_WEBUI_KEEP_SERVICE` | unset | any value (= `--keep-service`): on quit only stop playback, keep the service running |
-| `AM_WEBUI_SEAMLESS` | on | `0`: no seamless transitions, every queue item is loaded on its own and the engine paused at its end (above). On, while the engine's crossfade is on: also turns the engine's own autoplay off, once per connection (MusicKit's autoplay fills the queue; an engine that crossfades would fade into its own pick before Sidra can pause it). If Sidra turned it off, it turns it back on at quit (after `/stop`, before `/quit`; also with `AM_WEBUI_KEEP_SERVICE`; best effort within the 3 s quit budget); autoplay that was off already is left off. After a crash it stays off. A failed `/crossfade` or `/autoplay` is retried 5 s apart, three attempts per connection. A slow `/status` (a long `/enqueue` holds the engine) keeps the connection for up to 60 s |
+| `AM_WEBUI_SEAMLESS` | on | `0`: no seamless transitions, every queue item is loaded on its own and the engine paused at its end (above). On, while the engine's crossfade is on: also turns the engine's own autoplay off, once per connection (MusicKit's autoplay fills the queue; an engine that crossfades would fade into its own pick before Sidra can pause it). If Sidra turned it off, it turns it back on at quit (after `/stop`, before `/quit`; also with `AM_WEBUI_KEEP_SERVICE`; best effort within the 3 s quit budget); autoplay that was off already is left off. Sidra notes in its config that it turned it off, so after a crash or a failed restore the next start turns it back on (or, if that start keeps it off, restores it at its quit). A failed `/crossfade` or `/autoplay` is retried 5 s apart, three attempts per connection. A slow `/status` (a long `/enqueue` holds the engine) keeps the connection for up to 60 s |
 | `AM_WEBUI_CROSSFADE` | unset (the engine's setting) | `0`: crossfade off; `1` to `12`: crossfade on, that many seconds. Set in the engine (`POST /crossfade`, which keeps it) once its playback settings exist, at start-up and whenever the service comes back; anything else is logged and ignored. Only between songs that go on seamlessly, and only with the quality set to AAC (above) |
 | `AM_WEBUI_LIBRARY_SHUFFLE` | on | `0`: no Shuffle button on Library > Songs |
 | `AM_WEBUI_MIXED_QUEUE` | off | any value: play lists that mix songs and music videos (above) |
@@ -237,11 +239,12 @@ also ends the item; the list of queued songs then moves on by one). MusicKit the
 item, and `play()` takes over the track the engine already plays, with position and duration from
 the status, instead of sending `/play`. On every status the item is checked against MusicKit's
 next item again; when that changes (a queue edit, shuffle or repeat toggle, a skip, a new queue)
-it leaves the engine's queue (`POST /dequeue`, sent once no `/play` is running, and after
-MusicKit's `play()` of a new item) and the new next item is added if there is still time; the
+it leaves the engine's queue (`POST /dequeue`, sent once no command is running, waiting up to 2 s
+for MusicKit's `play()` of a new item) and the new next item is added if there is still time; the
 pause at the end applies again. An item whose `/enqueue` answered without a
-`queueItemId` is found in `upNext` by its song. A skip to the queued item itself is an ordinary
-`/play`.
+`queueItemId` is found in `upNext` by its song. A skip to the queued item itself is a `/next`
+(the engine moves on into it); if the `/next` fails, or the engine does not show the item as the
+current one within 10 s, it gets a `/play`.
 Without a confirmed next item (the last one, a music video next, an older service, a failed
 `/enqueue`), the old pause at the end applies; with one, the pause stays as a fallback 4 s past
 the end, and twelve statuses (instead of three) without the track count as its end. `/enqueue`
@@ -249,8 +252,8 @@ takes about 0.7-2.6 s (about 11-13 s for a song the album page does not have, ab
 and holds up the other commands (an older service also its status); statuses are not acted on while a command runs, and it is sent
 well before the end. A failed `/enqueue` is not retried for that track.
 
-With AAC and crossfade on, the next song is added once the track has played for the crossfade
-seconds plus 3 s, at least 3 s after the last command, and the one after it once `upNext` lists the
+With AAC and crossfade on, the next song is added once the track has played for 3 s, at least
+3 s after the last command, and the one after it once `upNext` lists the
 first. A pause or skip can wait behind such an `/enqueue`. When the first leaves the engine's queue,
 so does the second. Without "Add to Queue" in the app (500 `80004001`), only one song is queued from
 then on, near the end as above.

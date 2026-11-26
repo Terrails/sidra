@@ -47,6 +47,7 @@ interface StoreSchema {
   'classical.language': string | null;
   zoomFactor: number;
   musicService: MusicServiceId;
+  'agent.autoplayOff': boolean;
 }
 
 const store = new Conf<StoreSchema>();
@@ -275,6 +276,19 @@ export function getZoomFactor(): number {
 /** Persist `zoomFactor` without applying the setting to running components. */
 export function setZoomFactor(factor: number): void {
   setConfigValue('zoomFactor', factor);
+}
+
+/**
+ * Read `agent.autoplayOff`, defaulting to `false` when absent: Sidra turned the
+ * Wine engine's autoplay off and has not turned it back on yet.
+ */
+export function getAgentAutoplayOff(): boolean {
+  return getConfigValue('agent.autoplayOff', false);
+}
+
+/** Persist `agent.autoplayOff` (src/agent/index.ts). */
+export function setAgentAutoplayOff(off: boolean): void {
+  setConfigValue('agent.autoplayOff', off);
 }
 
 /** Read the stored service, falling back to the default for an unregistered id. */

@@ -33,7 +33,7 @@
 // pause, Play Next, a play), so its end is crossfaded too.
 const SEAM_LEAD_MS = 25000;
 // closer to the end than this (plus crossfade), no enqueue: while /enqueue runs the service
-// answers only /status, and it can take up to about 20 s, so the pause at the end would come
+// answers only /status and /quit, and it can take up to about 20 s, so the pause at the end would come
 // too late
 const SEAM_MIN_MS = 16000;
 const SEAM_GRACE_MS = 4000;    // an engine that has not gone on this long after the end is paused (the old way)
