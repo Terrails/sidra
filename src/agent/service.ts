@@ -199,11 +199,17 @@ export function startService(): boolean {
   let started: ChildProcess;
   try {
     // The environment goes through unchanged (AM_STOREFRONT, AM_LOG_DIR, ...); AM_PREFIX
-    // is the prefix Sidra reads the token from.
+    // is the prefix Sidra reads the token from. The audio stream claims Sidra's PID: the
+    // agent is a COM server whose parent is not Sidra, and taskbars (Plasma) match streams
+    // to windows by PID, so this gives Sidra's taskbar entry the mute and volume controls.
     started = spawn(agent, [String(PORT)], {
       detached: true,
       stdio: ["ignore", out, out],
-      env: { ...process.env, AM_PREFIX: PREFIX },
+      env: {
+        ...process.env,
+        AM_PREFIX: PREFIX,
+        "PULSE_PROP_OVERRIDE_application.process.id": String(process.pid),
+      },
     });
   } finally {
     if (typeof out === "number") fs.closeSync(out);

@@ -153,6 +153,12 @@ before it answers, the badge says "Engine failed to start" (the tooltip gives th
 log names `amd-start.log`, and Sidra tries again every 25 s. A service that keeps rejecting
 Sidra's API token (usually `AM_PREFIX` differs from the running service's) is logged once.
 
+The service is started with `PULSE_PROP_OVERRIDE_application.process.id` set to Sidra's PID, so
+the engine's audio stream claims to be Sidra's. Taskbars that match streams to windows by PID
+(Plasma) then show the audio indicator, mute and volume on Sidra's entry; without it the stream
+belongs to the agent, a Wine COM server whose parent is not Sidra. A service started some other
+way (`AM_WEBUI_NO_SPAWN`, or one still running from an earlier Sidra) keeps its own PID.
+
 ### Settings
 
 Sidra's own settings (environment variables of the Sidra process):
