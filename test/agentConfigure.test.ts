@@ -322,12 +322,29 @@ describe("autoplay after a crash", () => {
     m.configure(status({ crossfade: { on: false, seconds: 6 }, autoplay: false })); // status not updated yet
     await flush();
     expect(posts()).toEqual(["/autoplay?on=1"]);
+    expect(marker.off).toBe(true); // cleared by a status that shows it on
+    m.configure(status({ crossfade: { on: false, seconds: 6 }, autoplay: true }));
     expect(marker.off).toBe(false);
     marker.off = true;
     m = await load({ AM_WEBUI_SEAMLESS: "0" });
     m.configure(status({ autoplay: false }));
     await flush();
+    m.configure(status({ autoplay: true }));
     expect(posts()).toEqual(["/autoplay?on=1", "/autoplay?on=1"]);
+    expect(marker.off).toBe(false);
+  });
+
+  it("keeps the mark while the restore is pending (202: nothing played yet)", async () => {
+    marker.off = true;
+    requestMock.mockImplementation(() => ok(202, { ok: true, autoplay: false, pending: true }));
+    const { configure } = await load({ AM_WEBUI_SEAMLESS: "0" });
+    configure(status({ autoplay: false }));
+    await flush();
+    configure(status({ autoplay: false }));
+    await flush();
+    expect(posts()).toEqual(["/autoplay?on=1"]); // accepted: not sent again
+    expect(marker.off).toBe(true);
+    configure(status({ autoplay: true })); // something played
     expect(marker.off).toBe(false);
   });
 
@@ -365,6 +382,18 @@ describe("autoplay after a crash", () => {
     await stopEngine();
     expect(posts()).toEqual(["/stop", "/autoplay?on=1", "/quit"]);
     expect(marker.off).toBe(false);
+  });
+
+  it("keeps the mark when the restore at quit is only pending", async () => {
+    const { configure, stopEngine } = await load();
+    configure(status());
+    await flush();
+    requestMock.mockImplementation((_m: string, p: string) =>
+      p === "/autoplay?on=1" ? ok(202, { ok: true, autoplay: false, pending: true }) : ok(),
+    );
+    await stopEngine();
+    expect(posts()).toEqual(["/autoplay?on=0", "/stop", "/autoplay?on=1", "/quit"]);
+    expect(marker.off).toBe(true);
   });
 
   it("keeps the mark when the restore at quit fails", async () => {

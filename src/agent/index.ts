@@ -256,8 +256,10 @@ export function configure(state: Record<string, unknown>): void {
     } else if (!state.autoplay && autoplayMarked) autoplayOff = true; // off since a crash: quit restores it
   } else if (autoplayMarked) {
     // a run that crashed turned it off, and this one does not want it off
+    // cleared by a status that shows it on: a service that has played nothing yet answers 202
+    // (pending) and takes the setting once something plays
     if (state.autoplay) markAutoplayOff(false);
-    else if (mayTry(autoplaySet)) send(autoplaySet, "/autoplay?on=1", () => markAutoplayOff(false));
+    else if (mayTry(autoplaySet)) send(autoplaySet, "/autoplay?on=1");
   }
 }
 
@@ -322,11 +324,12 @@ async function playerCommand(
  */
 export async function stopEngine(): Promise<void> {
   const start = Date.now();
+  // true: done (a 202 "pending" /autoplay is not: the service quits before it takes effect)
   const post = async (what: string, until: number): Promise<boolean> => {
     try {
       const reply = await request("POST", what, Math.max(300, until - Date.now()));
       agentLog.info(`quit: POST ${what} -> HTTP ${reply.status}`);
-      return reply.status >= 200 && reply.status < 300;
+      return reply.status >= 200 && reply.status < 300 && reply.json?.pending !== true;
     } catch (err: unknown) {
       if (!isRefused(err))
         agentLog.warn(`quit: POST ${what} failed: ${errorMessage(err)}`);
