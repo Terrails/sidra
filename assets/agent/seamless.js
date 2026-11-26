@@ -2,7 +2,7 @@
 // The parts run inside one closure, in the order AGENT_PARTS in src/agent/index.ts lists them,
 // and share its names; this one provides:
 //   seam, seamNext(), seamAfter(), seamStatus(), seamCheck(), seamHanded(), seamPassed(),
-//   seamReady(), seamDrop(), seamSource(), seamAdopt(), seamAhead()
+//   seamReady(), seamDrop(), seamSource(), seamAdopt(), seamSkip(), seamWith(), seamWithDone(), seamAhead()
 
 // ---- seamless transitions -----------------------------------------------------
 // Each queue item is its own /play, and AgentMedia pauses the engine just before the end, so
@@ -15,7 +15,9 @@
 // crossfades switches to the new song early, by up to the crossfade seconds; that ends the
 // item too. Only when both items are catalogue songs that MusicKit plays one after the other
 // (not with repeat-one, nor when MusicKit stops after the item); a queue change, shuffle or
-// repeat toggle, skip or new queue takes the item out of the engine's queue again (/dequeue).
+// repeat toggle, skip or new queue takes the item out of the engine's queue again (/dequeue),
+// except a skip to the item that is next in the engine's queue: that sends /next (seamSkip()),
+// and the item after it stays queued.
 // Anything else keeps the pause at the end. Off with AM_WEBUI_SEAMLESS=0 (cfg.seamless,
 // src/agent/index.ts).
 // With quality "aac" and crossfade on (seamAhead()), the engine's docs (docs/api.md) say the
@@ -24,21 +26,28 @@
 // the one after it with at=end ("Add to Queue": the end of the added items, in order). The
 // list seam.q holds those entries in engine order; after a hand-over the second becomes the
 // first for the next item. Everything else keeps the single item and the window above.
+// A skip to MusicKit's next item would otherwise cost the next crossfade too: a /play starts
+// the item with nothing queued behind it. /next moves the engine on into the item, with the
+// one after it already queued. And a /play (a new queue, a pick from a list) names MusicKit's next
+// item (seamWith(): next=&nextAlbum=): the engine queues it before the played song goes on (a
+// pause, Play Next, a play), so its end is crossfaded too.
 const SEAM_LEAD_MS = 25000;
 // closer to the end than this (plus crossfade), no enqueue: while /enqueue runs the service
 // answers only /status, and it can take up to about 20 s, so the pause at the end would come
 // too late
 const SEAM_MIN_MS = 16000;
 const SEAM_GRACE_MS = 4000;    // an engine that has not gone on this long after the end is paused (the old way)
-// chosen, not measured: after a command, and after the item started (plus the crossfade
-// seconds), before an item is added with seamAhead(); and how long MusicKit may take to set the next item
-// after a hand-over
+// chosen, not measured: after a command, and after the item started, before an item is added with
+// seamAhead() (also inside the fade-out of the previous item: measured fine, 2026-11-26); and how
+// long MusicKit may take to set the next item after a hand-over
 const SEAM_SETTLE_MS = 3000;
 const SEAM_MOVE_MS = 2000;
+const SKIP_WAIT_MS = 10000;    // how long the engine may take to show the item after a /next (chosen)
 const seam = {
   q: [],           // { song, itemId, qid, ok, dropped }: MusicKit's next items (2 at most), in the engine's
                    //   order (qid: the engine's queue item ID, undefined while /enqueue runs; ok: seamReady())
   handoff: null,   // { song, at }: the engine went on into it; MusicKit's next play() takes it over
+  skip: null,      // { song, qid }: MusicKit skipped to the engine's next item; its play() sends /next
   stale: [],       // { qid, song, at }: items to take out of the engine's queue (qid '': looked up by song in upNext)
   tried: -1,       // the AgentMedia item gen in which an /enqueue failed (or the queue API went away)
   bad: null,       // the song of the last failed /enqueue: not sent again with seamAhead()
@@ -202,16 +211,31 @@ function seamCheck(s, m, job) {
     return;
   }
   // not while items are being taken out (the order), nor right after a command or the start
-  if (seam.stale.length || now() - lastCmdAt < SEAM_SETTLE_MS || m._pos * 1000 < fade + SEAM_SETTLE_MS) return;
+  if (seam.stale.length || now() - lastCmdAt < SEAM_SETTLE_MS || m._pos * 1000 < SEAM_SETTLE_MS) return;
   // an unknown duration of the next item: one only
   const x = !q.length ? seamNext(job) : q[0].ok && n.durMs >= fade + SEAM_MIN_MS ? seamAfter(job, n) : null;
   if (x && x.song !== seam.bad) seamEnqueue(m._gen, x, q.length > 0);
 }
 
+// the engine's next item is this entry (qid), confirmed in the latest status, and not playing yet
+function seamFirst(e) {
+  const s = status, u = s && Array.isArray(s.upNext) && s.upNext[0];
+  return !!(e && e.qid && u && u.queueItemId === e.qid && s.nowPlaying && s.nowPlaying.queueItemId !== e.qid);
+}
+
 // the src of AgentMedia was set (job: the new item, if any): its entries stay only for the
-// hand-over that is taken over
+// hand-over that is taken over, or for a skip to the engine's next item (seamSkip())
 function seamSource(job) {
-  if (!seam.handoff || (job && String(job.song) !== seam.handoff.song)) seamDrop('item replaced');   // skip, previous, a new queue
+  seam.skip = null;
+  if (seam.handoff && (!job || String(job.song) === seam.handoff.song)) return;
+  const e = seam.q[0];
+  if (!seam.handoff && job && e && e.ok && String(job.song) === e.song && seamFirst(e)) {
+    seam.q.shift();
+    seam.skip = { song: e.song, qid: e.qid };
+    log('seamless: skip into', e.song, e.qid);
+    return;
+  }
+  seamDrop('item replaced');                         // skip, previous, a new queue
 }
 
 // MusicKit's next item (job) is the song the engine went on into: true when the play() of it
@@ -223,4 +247,40 @@ function seamAdopt(job) {
   const ok = !!(h && h.song === String(job.song) && now() - h.at < 30000 && np && np.songId === h.song);
   if (ok) seam.adoptedAt = now();
   return ok;
+}
+
+// MusicKit skipped to the engine's next item (job, seamSource()): the entry for play() to send
+// /next for, while the engine still has it next (once), else null
+function seamSkip(job) {
+  const k = seam.skip;
+  seam.skip = null;
+  if (!k || k.song !== String(job.song) || !seamFirst(k)) return null;
+  seam.adoptedAt = now();
+  return k;
+}
+
+// a /play of job, or a /next into it with nothing queued behind it, with AAC and crossfade:
+// MusicKit's next item goes with it (next=), and its entry heads seam.q while the command runs;
+// null when there is none or the song is too short for it
+function seamWith(job) {
+  const s = status;
+  if (!seamOn(s) || !seamAhead(s) || seam.q.length) return null;
+  if (job.durMs && job.durMs < seamFade(s) + SEAM_MIN_MS) return null;
+  const n = seamNext(job);
+  if (!n || n.song === seam.bad) return null;
+  const e = { song: n.song, itemId: n.itemId, qid: undefined, album: n.album };
+  seam.q.push(e);
+  log('seamless: play with next', n);
+  return e;
+}
+
+// the answer r of that /play or /next: the entry gets its queue item, or goes (not queued, or a service
+// without next=: queued later in the track as before)
+function seamWithDone(e, r) {
+  const queued = !!(r && r.ok && typeof r.nextQueueItemId === 'string');
+  if (queued && e.dropped) { seam.stale.push({ qid: r.nextQueueItemId, song: e.song, at: now() }); return; }
+  if (queued) { e.qid = r.nextQueueItemId; return; }
+  const i = seam.q.indexOf(e);
+  if (i >= 0) seam.q.splice(i, 1);
+  if (r && r.nextQueued === false) log('seamless: next not queued with the command', e.song);
 }

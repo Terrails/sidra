@@ -165,14 +165,21 @@ class AgentMedia extends EventTarget {
     this._paused = false;
     // the engine went on into this item by itself (seamless.js): take over what plays
     const adopt = seamAdopt(job);
-    if (!adopt) seamDrop('not taken over');
+    // MusicKit skipped to the engine's next item: /next instead of /play keeps the one after it queued
+    const skip = adopt ? null : seamSkip(job);
+    if (!adopt && !skip) seamDrop('not taken over');
+    // with AAC and crossfade, a /play (or a /next with nothing queued behind the item) takes
+    // MusicKit's next item along
+    const withNext = adopt ? null : seamWith(job);
     this._pending = (async () => {
-      log(adopt ? 'adopt' : 'play', job);
+      log(adopt ? 'adopt' : skip ? 'next' : 'play', job);
       const r = adopt ? await (status.paused ? send('resume') : { ok: true })   // always yields, so that _pending is set before it is cleared
-        : await send('play', { song: job.song, album: job.album, storefront: job.cc }, () => gen !== this._gen);
+        : skip ? await this._skipTo(skip, job, gen, withNext)
+        : await send('play', { song: job.song, album: job.album, storefront: job.cc, ...(withNext && { next: withNext.song, nextAlbum: withNext.album }) }, () => gen !== this._gen);
+      if (withNext && !skip) seamWithDone(withNext, r);
       if (gen !== this._gen) throw aborted();
       if (!r.ok) throw this._fail(r.error || 'The player engine could not start this track.');
-      const s = adopt && status.playing && matches(status, job) ? status : await waitStatus((x) => x.playing && matches(x, job), 15000);
+      const s = (adopt || skip) && status.playing && matches(status, job) ? status : await waitStatus((x) => x.playing && matches(x, job), 15000);
       if (gen !== this._gen) throw aborted();
       if (!s) throw this._fail('The player engine did not start this track.');
       this._pending = null;
@@ -195,6 +202,23 @@ class AgentMedia extends EventTarget {
     })();
     this._pending.catch(() => {});
     return this._pending;
+  }
+
+  // /next into the engine's next item (k, seamSkip()), taking withNext (seamWith()) along when
+  // nothing is queued behind it yet; a /play of the job if the engine does not show it as playing
+  // in SKIP_WAIT_MS
+  async _skipTo(k, job, gen, withNext) {
+    const r = await send('next', withNext ? { next: withNext.song, nextAlbum: withNext.album, storefront: job.cc } : undefined, () => gen !== this._gen);
+    if (withNext) seamWithDone(withNext, r);
+    if (gen !== this._gen) return r;
+    const on = (x) => !!(x && x.nowPlaying && x.nowPlaying.queueItemId === k.qid);
+    const s = r.ok ? (on(status) ? status : await waitStatus(on, SKIP_WAIT_MS)) : null;
+    if (gen !== this._gen) return { ok: true };
+    if (s) return r;                                 // the engine starts it (also when it was paused)
+    log('seamless: /next did not reach', k.song, r.ok ? '' : r.error || r);
+    seam.stale.push({ qid: k.qid, song: k.song, at: now() });   // taken out after the /play, like the rest
+    seamDrop('next failed');
+    return send('play', { song: job.song, album: job.album, storefront: job.cc }, () => gen !== this._gen);
   }
 
   _fail(message) {

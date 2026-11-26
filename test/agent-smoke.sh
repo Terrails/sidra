@@ -7,8 +7,9 @@
 #   seamless two consecutive engine songs (test/agent-smoke-seamless.js): AM_WEBUI_CROSSFADE and
 #            then the engine's autoplay set at start-up; with crossfade on (which the engine, and
 #            so the mock, ignores under Wine) and off, the second song takes over at the end
-#            without /play or /pause; a skip while the second is queued plays it and takes it
-#            out of the engine's queue; a mock without the queue API (POST /mock/seamless?on=0)
+#            without /play or /pause (with AAC and crossfade the /play takes the second song
+#            along, next=, instead of an /enqueue); a skip while the second is queued moves the engine on into
+#            it with /next (no /play or /dequeue); a mock without the queue API (POST /mock/seamless?on=0)
 #            gets the old pause at the end and /play
 #   badge    the "engine not responding" badge (the mock's POST /mock/hang) shows and clears
 #   reload   a page reload pauses playback, also a track that is still loading
@@ -180,9 +181,13 @@ check_seamless() {
         echo "  seamless: crossfade set from AM_WEBUI_CROSSFADE, the engine's autoplay turned off"
     else echo "  seamless: FAILED, no POST /crossfade?on=1&s=6 or /autoplay?on=0 at start-up"; FAIL=1; fi
     check_seam "$1" end crossfade 'item=second state=2' 'left=[01]\.' '+POST /enqueue?.*song='"$SONG2" '+crossfade on, no effect) into' '-POST /play' '-POST /pause'
+    # AAC: the /play takes the second song along (next=), the service queues it, no /enqueue
+    mock_post "/quality?q=aac"; sleep 1
+    check_seam "$1" end crossfade-aac 'item=second state=2' 'left=[01]\.' '+now playing .* next ' '-POST /enqueue?.*song='"$SONG2" '+crossfade on, no effect) into' '-POST /play' '-POST /pause'
+    mock_post "/quality?q=lossless"
     mock_post "/crossfade?on=0"
     check_seam "$1" end gapless 'item=second state=2' 'left=[01]\.' '+POST /enqueue?.*song='"$SONG2" '+end, gapless into' '-POST /play' '-POST /pause'
-    check_seam "$1" skip skip 'item=second state=2' '+POST /enqueue' '+POST /play?.*song='"$SONG2" '+POST /dequeue?id='
+    check_seam "$1" skip skip 'item=second state=2' '+POST /enqueue' '+POST /next' '-POST /play' '-POST /dequeue'
     mock_post "/mock/seamless?on=0"
     check_seam "$1" end fallback 'item=second state=2' '+POST /pause' '+POST /play?.*song='"$SONG2" '-POST /enqueue'
     mock_post "/mock/seamless?on=1"

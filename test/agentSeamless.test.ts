@@ -209,7 +209,7 @@ describe("seamless hand-over", () => {
     ]);
   });
 
-  it("plays a skipped-to item and only then takes the enqueued one out", async () => {
+  it("skips into the enqueued item with /next, without /play or a dequeue", async () => {
     load();
     await start(A);
     await push(status(A, 181));
@@ -218,13 +218,45 @@ describe("seamless hand-over", () => {
     page.media.src = srcOf(B);                        // the user skips to it
     const p = page.media.play();
     await vi.advanceTimersByTimeAsync(10);
+    await push(status(B, 0));                         // the engine went on into its queue item 9102
+    await push(status(B, 1));
+    await p;
+    expect(names()).toEqual(["play", "enqueue", "next"]);
+    expect(page.seam.q).toEqual([]);
+    expect(ended).toBe(0);
+  });
+
+  it("plays the item with /play when the engine does not show it after /next", async () => {
+    load();
+    await start(A);
+    await push(status(A, 181));
+    await push(status(A, 182, { upNext: upNext(B) }));
+    mk.queue.position = 1;
+    page.media.src = srcOf(B);
+    const p = page.media.play();
+    await vi.advanceTimersByTimeAsync(10);
+    await push(status(A, 183), 10_500);               // still A: /next did nothing
     const fresh = (st: Status): Status => ({ ...st, nowPlaying: { ...(st.nowPlaying as Status), queueItemId: "9900" } });
-    await push(fresh(status(B, 0)));                 // /play made a new queue item
+    await push(fresh(status(B, 0)));
+    await p;
+    await push(fresh(status(B, 1)));
+    expect(names()).toEqual(["play", "enqueue", "next", "play", "dequeue"]);
+    expect(cmds[4][1]).toEqual({ id: "9102" });
+  });
+
+  it("plays a skipped-to item with /play before the engine has listed the enqueued one", async () => {
+    load();
+    await start(A);
+    await push(status(A, 181));                       // enqueued, not yet in upNext
+    mk.queue.position = 1;
+    page.media.src = srcOf(B);
+    const p = page.media.play();
+    await vi.advanceTimersByTimeAsync(10);
+    const fresh = (st: Status): Status => ({ ...st, nowPlaying: { ...(st.nowPlaying as Status), queueItemId: "9900" } });
+    await push(fresh(status(B, 0)));
     await p;
     await push(fresh(status(B, 1)));
     expect(names()).toEqual(["play", "enqueue", "play", "dequeue"]);
-    expect(cmds[3][1]).toEqual({ id: "9102" });
-    expect(ended).toBe(0);
   });
 
   it("pauses at the end when the engine never shows the item as next", async () => {
@@ -338,9 +370,9 @@ describe("two items ahead (AAC with crossfade)", () => {
     load();
     await start(A);
     await vi.advanceTimersByTimeAsync(4000);
-    await push(status(A, 9, xf));                      // before fade + 3 s of the track
+    await push(status(A, 2, xf));                      // within 3 s of the track's start
     expect(names()).toEqual(["play"]);
-    await push(status(A, 12, xf));
+    await push(status(A, 4, xf));                      // also inside the previous item's fade-out
     expect(cmds[1]).toEqual(enq("102"));
     await push(status(A, 13, { ...xf, upNext: up(B) }));
     await vi.advanceTimersByTimeAsync(3500);
@@ -462,6 +494,44 @@ describe("two items ahead (AAC with crossfade)", () => {
     expect(names().slice(5)).toEqual(["pause"]);
   });
 
+  it("takes the item after along with /next when only B was queued", async () => {
+    load();
+    await start(A);
+    await vi.advanceTimersByTimeAsync(4000);
+    await push(status(A, 4, xf));
+    await push(status(A, 5, { ...xf, upNext: up(B) }));
+    expect(names()).toEqual(["play", "enqueue"]);       // B only: C waits 3 s after the command
+    replies.next = () => ({ ok: true, hresult: "00000000", loadMs: 1600, nextQueueItemId: "9103" });
+    mk.queue.position = 1;
+    page.media.src = srcOf(B);                         // the user skips to B at once
+    const p = page.media.play();
+    await vi.advanceTimersByTimeAsync(10);
+    await push(status(B, 0, { ...xf, upNext: up(C) }));
+    await push(status(B, 1, { ...xf, upNext: up(C) }));
+    await p;
+    expect(cmds[2]).toEqual(["next", { next: "103", nextAlbum: "77", storefront: "gb" }]);
+    expect(page.seam.q).toMatchObject([{ song: "103", qid: "9103" }]);
+  });
+
+  it("skips into B with /next and keeps C queued, so B can crossfade into C", async () => {
+    load();
+    await two();
+    mk.queue.position = 1;
+    page.media.src = srcOf(B);                         // the user skips to B
+    const p = page.media.play();
+    await vi.advanceTimersByTimeAsync(10);
+    await push(status(B, 0, { ...xf, upNext: up(C) }));
+    await push(status(B, 1, { ...xf, upNext: up(C) }));
+    await p;
+    await push(status(B, 2, { ...xf, upNext: up(C) }));
+    expect(names().slice(3)).toEqual(["next"]);
+    expect(page.seam.q.map((e) => e.song)).toEqual(["103"]);
+    // and D is queued behind C once things have settled
+    await vi.advanceTimersByTimeAsync(10_000);
+    await push(status(B, 13, { ...xf, upNext: up(C) }));
+    expect(cmds.slice(4)).toEqual([enq("104", "end")]);
+  });
+
   it("plays a skipped-to item first, then takes both out", async () => {
     load();
     await two();
@@ -492,8 +562,87 @@ describe("two items ahead (AAC with crossfade)", () => {
     await p;
     await push(fresh(1));
     expect(names().slice(3)).toEqual(["play", "dequeue"]);
-    expect(cmds[3]).toEqual(["play", { song: "103", album: "77", storefront: "gb" }]);
+    expect(cmds[3]).toEqual(["play", { song: "103", album: "77", storefront: "gb", next: "104", nextAlbum: "77" }]);
     expect(cmds[4]).toEqual(["dequeue", { id: "9103" }]);
+  });
+
+  /** a status with crossfade, then a fresh /play of A (a new queue) */
+  async function playFresh(reply: Reply): Promise<{ p: Promise<void> }> {
+    replies.play = () => reply;
+    await push(status(null, 0, xf));
+    page.media.src = srcOf(A);
+    const p = page.media.play();
+    await vi.advanceTimersByTimeAsync(10);
+    return { p };
+  }
+
+  it("takes MusicKit's next item along with a /play, then queues C behind it", async () => {
+    load();
+    const { p } = await playFresh({ ok: true, hresult: "00000000", loadMs: 900, nextQueueItemId: "9102" });
+    await push(status(A, 1, { ...xf, upNext: up(B) }));
+    await p;
+    expect(cmds[0]).toEqual(["play", { song: "101", album: "77", storefront: "gb", next: "102", nextAlbum: "77" }]);
+    expect(page.seam.q).toMatchObject([{ song: "102", qid: "9102" }]);
+    await vi.advanceTimersByTimeAsync(12_000);
+    await push(status(A, 13, { ...xf, upNext: up(B) }));
+    await push(status(A, 14, { ...xf, upNext: up(B) }));
+    expect(cmds.slice(1)).toEqual([enq("103", "end")]);
+  });
+
+  it("queues B later as before when the /play did not queue it", async () => {
+    load();
+    const { p } = await playFresh({ ok: true, hresult: "00000000", loadMs: 900, nextQueued: false });
+    await push(status(A, 1, xf));
+    await p;
+    expect(page.seam.q).toEqual([]);
+    await vi.advanceTimersByTimeAsync(12_000);
+    await push(status(A, 13, xf));
+    expect(cmds.slice(1)).toEqual([enq("102")]);
+  });
+
+  it("queues B later as before with a service that ignores next=", async () => {
+    load();
+    const { p } = await playFresh({ ok: true, hresult: "00000000", loadMs: 900 });
+    await push(status(A, 1, xf));
+    await p;
+    expect(page.seam.q).toEqual([]);
+  });
+
+  it("does not take the next item along without crossfade", async () => {
+    load();
+    replies.play = () => ({ ok: true });
+    await push(status(null, 0, { crossfade: { on: false, seconds: 8 }, quality: "aac" }));
+    page.media.src = srcOf(A);
+    const p = page.media.play();
+    await vi.advanceTimersByTimeAsync(10);
+    await push(status(A, 1));
+    await p;
+    expect(cmds[0]).toEqual(["play", { song: "101", album: "77", storefront: "gb" }]);
+  });
+
+  it("takes the next item out again when MusicKit moved on during the /play", async () => {
+    load();
+    let answer: (r: Reply) => void = () => {};
+    replies.play = () => new Promise<Reply>((res) => { answer = res; }) as unknown as Reply;
+    await push(status(null, 0, xf));
+    page.media.src = srcOf(A);
+    void page.media.play().catch(() => {});
+    await vi.advanceTimersByTimeAsync(10);
+    expect(page.seam.q).toMatchObject([{ song: "102" }]);
+    mk.queue.position = 3;
+    replies.play = () => ({ ok: true });
+    page.media.src = srcOf(D);                         // the user picks D meanwhile
+    expect(page.seam.q).toEqual([]);
+    answer({ ok: true, nextQueueItemId: "9102" });
+    const p = page.media.play();
+    await vi.advanceTimersByTimeAsync(10);
+    const fresh = (x: number): Status => ({ ...status(D, x, xf), nowPlaying: { ...(status(D, x).nowPlaying as Status), queueItemId: "9900" } });
+    await push(fresh(0));
+    await p;
+    await push(fresh(1));
+    await push(fresh(2));
+    expect(names()).toContain("dequeue");
+    expect(cmds.find(([n]) => n === "dequeue")?.[1]).toEqual({ id: "9102" });
   });
 
   it.each([

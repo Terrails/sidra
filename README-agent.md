@@ -28,15 +28,20 @@ music.apple.com, exactly as in upstream Sidra. Everything else in this repositor
   is added to the engine's own queue ("Play Next", `POST /enqueue`), the engine goes on into it
   by itself, and MusicKit's next item takes over the track that is already playing instead of
   loading it again (see [How it works](#how-it-works)). A queue change, shuffle or repeat
-  toggle, skip or new queue takes it out of the engine's queue again (`POST /dequeue`). It
+  toggle, skip or new queue takes it out of the engine's queue again (`POST /dequeue`), except a
+  skip to that very song: the engine then moves on into it (`POST /next`), and with crossfade the
+  song after it stays queued, so the skipped-to song still crossfades into the next one. It
   needs a service with the queue API (`upNext` in its status); with an older one, with
   repeat-one, before a music video and after the last item, tracks are loaded one at a time as
   before. On by default, `AM_WEBUI_SEAMLESS=0` turns it off.
 - **Crossfade** (`AM_WEBUI_CROSSFADE`, or the engine's own setting) with AAC only: the engine
   crossfades a song only when the next one was queued before it started (the agent's
   `KNOWN_ISSUES.md`). With the quality set to AAC and crossfade on, Sidra therefore queues the next
-  two songs early in a track, the second one with `at=end` ("Add to Queue"). The first change after
-  a new `/play` is normally not crossfaded. Only one song is queued when MusicKit's list does not
+  two songs early in a track, the second one with `at=end` ("Add to Queue"). A new `/play` (a pick
+  from a list, a new queue) takes the next song along (`next=`): the engine queues it and pauses
+  and plays the new song once, so its first change is crossfaded too; it starts about 1-3 s later.
+  A skip to the next song is a `/next`, not a `/play`; when nothing is queued behind that song yet
+  (a skip within about 3 s of a track's start), the `/next` takes the song after it along too. Only one song is queued when MusicKit's list does not
   show the one after it (end of the queue, repeat-all wrap) or it is the same song again, or when
   the next song is short. Songs of the same album are, by the engine's code, not crossfaded (not
   measured); they go on gaplessly.

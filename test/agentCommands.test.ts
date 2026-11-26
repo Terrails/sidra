@@ -118,6 +118,29 @@ describe("commandPath", () => {
     );
   });
 
+  it("skips with the next song to queue behind the new item", async () => {
+    expect(await commandPath("next", { next: "3", nextAlbum: "4", storefront: "gb" })).toBe("/next?next=3&nextAlbum=4&storefront=gb");
+    await expect(commandPath("next", { next: "3&x=1", nextAlbum: "4" })).rejects.toThrow("unknown player command");
+  });
+
+  it("plays with the next song to queue behind it, looking its album up if needed", async () => {
+    expect(await commandPath("play", { song: "1", album: "2", storefront: "gb", next: "3", nextAlbum: "4" })).toBe(
+      "/play?album=2&song=1&storefront=gb&queue=single&next=3&nextAlbum=4",
+    );
+    fetchMock.mockResolvedValue(lookupReply([{ trackId: 4343, collectionId: 78 }]));
+    expect(await commandPath("play", { song: "1", album: "2", storefront: "gb", next: "4343" })).toBe(
+      "/play?album=2&song=1&storefront=gb&queue=single&next=4343&nextAlbum=78",
+    );
+  });
+
+  it.each([[{ next: "3&x=1", nextAlbum: "4" }], [{ next: 3, nextAlbum: "4" }], [{ next: "3", nextAlbum: "4/../quit" }]])(
+    "refuses play with %j",
+    async (extra) => {
+      await expect(commandPath("play", { song: "1", album: "2", ...extra })).rejects.toThrow("unknown player command");
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([["x"], [""], [5], ["end&x=1"]])("refuses enqueue with at=%j without a lookup", async (at) => {
     await expect(commandPath("enqueue", { song: "1", at })).rejects.toThrow("unknown player command");
     await expect(commandPath("enqueue", { song: "1", album: "2", at })).rejects.toThrow("unknown player command");

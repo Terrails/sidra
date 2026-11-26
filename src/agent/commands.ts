@@ -49,6 +49,15 @@ export async function commandPath(
   cmd: string,
   arg: Record<string, unknown>,
 ): Promise<string> {
+  // next with next=: the song to queue behind the skipped-to one before it goes on (seamless.js)
+  if (cmd === "next" && arg.next != null) {
+    const n = await songQuery({ song: arg.next, album: arg.nextAlbum, storefront: arg.storefront });
+    if (n) {
+      const q = new URLSearchParams(n);
+      return `/next?next=${q.get("song")}&nextAlbum=${q.get("album")}&storefront=${q.get("storefront")}`;
+    }
+    throw new Error("unknown player command");
+  }
   if (SIMPLE.has(cmd)) return `/${cmd}`;
   if (cmd === "play" || cmd === "enqueue") {
     // enqueue: at=next (Play Next, the service's default) or at=end (Add to Queue)
@@ -58,10 +67,17 @@ export async function commandPath(
     // queue=single: MusicKit keeps the queue here and asks for one song at a time, so
     // the service must not queue the rest of the album (its default). enqueue adds the
     // song to the queue (seamless.js), which plays on.
-    if (query)
-      return cmd === "play"
-        ? `/play?${query}&queue=single`
-        : `/enqueue?${query}${arg.at != null ? `&at=${arg.at}` : ""}`;
+    if (query && cmd === "enqueue")
+      return `/enqueue?${query}${arg.at != null ? `&at=${arg.at}` : ""}`;
+    // next: the song to queue behind it before it goes on (the engine's crossfade, seamless.js)
+    if (query && arg.next == null) return `/play?${query}&queue=single`;
+    if (query && arg.next != null) {
+      const next = await songQuery({ song: arg.next, album: arg.nextAlbum, storefront: arg.storefront });
+      if (next) {
+        const n = new URLSearchParams(next);
+        return `/play?${query}&queue=single&next=${n.get("song")}&nextAlbum=${n.get("album")}`;
+      }
+    }
   }
   // the service's queue item IDs are numbers (UINT64), like catalogue IDs
   if (cmd === "dequeue" && (arg.id == null || isId(arg.id)))
